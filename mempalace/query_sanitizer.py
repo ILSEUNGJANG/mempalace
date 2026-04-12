@@ -24,7 +24,7 @@ import logging
 logger = logging.getLogger("mempalace_mcp")
 
 # --- Constants ---
-MAX_QUERY_LENGTH = 500  # Above this, system prompt almost certainly dominates
+MAX_QUERY_LENGTH = 250  # Above this, prompt contamination increasingly dominates
 SAFE_QUERY_LENGTH = 200  # Below this, query is almost certainly clean
 MIN_QUERY_LENGTH = 10  # Extracted result shorter than this = extraction failed
 
@@ -67,6 +67,20 @@ def sanitize_query(raw_query: str) -> dict:
     raw_query = raw_query.strip()
     original_length = len(raw_query)
 
+    def _trim_candidate(candidate: str) -> str:
+        candidate = candidate.strip().strip("\"'")
+        if len(candidate) <= MAX_QUERY_LENGTH:
+            return candidate
+
+        nested_fragments = [
+            frag.strip().strip("\"'") for frag in _SENTENCE_SPLIT.split(candidate) if frag.strip()
+        ]
+        for frag in reversed(nested_fragments):
+            if MIN_QUERY_LENGTH <= len(frag) <= MAX_QUERY_LENGTH:
+                return frag
+
+        return candidate[-MAX_QUERY_LENGTH:].strip()
+
     # --- Step 1: Short query passthrough ---
     if original_length <= SAFE_QUERY_LENGTH:
         return {
@@ -106,7 +120,7 @@ def sanitize_query(raw_query: str) -> dict:
         if len(candidate) >= MIN_QUERY_LENGTH:
             # Apply length guard
             if len(candidate) > MAX_QUERY_LENGTH:
-                candidate = candidate[-MAX_QUERY_LENGTH:]
+                candidate = _trim_candidate(candidate)
             logger.warning(
                 "Query sanitized: %d → %d chars (method=question_extraction)",
                 original_length,
@@ -126,9 +140,7 @@ def sanitize_query(raw_query: str) -> dict:
     for seg in reversed(all_segments):
         seg = seg.strip()
         if len(seg) >= MIN_QUERY_LENGTH:
-            candidate = seg
-            if len(candidate) > MAX_QUERY_LENGTH:
-                candidate = candidate[-MAX_QUERY_LENGTH:]
+            candidate = _trim_candidate(seg)
             logger.warning(
                 "Query sanitized: %d → %d chars (method=tail_sentence)",
                 original_length,

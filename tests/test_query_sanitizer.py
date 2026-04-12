@@ -123,6 +123,9 @@ class TestTailTruncation:
 class TestLengthGuards:
     """Verify output length constraints."""
 
+    def test_max_query_length_reduced(self):
+        assert MAX_QUERY_LENGTH == 250
+
     def test_output_never_exceeds_max(self):
         # Very long question sentence
         long_question = "a" * 1000 + "?"
