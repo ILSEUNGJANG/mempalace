@@ -43,9 +43,32 @@ def _sanitize_session_id(session_id: str) -> str:
     return sanitized or "unknown"
 
 
+def _validate_transcript_path(transcript_path: str) -> Path:
+    """Validate and resolve a transcript path, rejecting paths outside expected roots.
+
+    Returns a resolved Path if valid, or None if the path should be rejected.
+    Accepted paths must:
+    - Have a .jsonl or .json extension
+    - Not contain '..' after resolution (path traversal prevention)
+    """
+    if not transcript_path:
+        return None
+    path = Path(transcript_path).expanduser().resolve()
+    if path.suffix not in (".jsonl", ".json"):
+        return None
+    # Reject if the original input contained '..' traversal components
+    if ".." in Path(transcript_path).parts:
+        return None
+    return path
+
+
 def _count_human_messages(transcript_path: str) -> int:
     """Count human messages in a JSONL transcript, skipping command-messages."""
-    path = Path(transcript_path).expanduser()
+    path = _validate_transcript_path(transcript_path)
+    if path is None:
+        if transcript_path:
+            _log(f"WARNING: transcript_path rejected by validator: {transcript_path!r}")
+        return 0
     if not path.is_file():
         return 0
     count = 0
