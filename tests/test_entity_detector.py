@@ -392,6 +392,11 @@ def _temp_locale(locale_code: str, entity_section: dict):
 
     Cleans up the file and clears every cache that depends on locale data on exit,
     even if the test fails or the entity section is invalid.
+
+    Note: writes into the real mempalace/i18n/ directory. If a test process is
+    SIGKILLed mid-test the orphan zz-test-*.json file will break test_all_languages_load
+    on the next run (the fixture lacks the required terms/cli/aaak sections).
+    Recover with `rm mempalace/i18n/zz-test-*.json`.
     """
     from mempalace import i18n
     from mempalace import entity_detector
