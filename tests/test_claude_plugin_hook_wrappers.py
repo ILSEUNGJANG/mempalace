@@ -60,7 +60,7 @@ def _run_hook(
     env["PATH"] = str(bin_dir)
 
     return subprocess.run(
-        [BASH, str(PLUGIN_HOOKS_DIR / script_name)],
+        [BASH, _shell_path(PLUGIN_HOOKS_DIR / script_name)],
         input=payload,
         text=True,
         capture_output=True,
