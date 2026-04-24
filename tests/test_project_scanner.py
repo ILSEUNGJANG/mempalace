@@ -27,6 +27,8 @@ from mempalace.project_scanner import (
     to_detected_dict,
 )
 
+GIT_ENV_ALLOWLIST = ("PATH", "HOME", "SystemRoot", "ComSpec", "TMPDIR", "TEMP", "TMP")
+
 
 # ── manifest parsers ────────────────────────────────────────────────────
 
@@ -228,7 +230,7 @@ def _git_test_env(name: str, email: str) -> dict[str, str]:
         "GIT_COMMITTER_NAME": name,
         "GIT_COMMITTER_EMAIL": email,
     }
-    for key in ("PATH", "HOME", "SystemRoot", "ComSpec", "TMPDIR", "TEMP", "TMP"):
+    for key in GIT_ENV_ALLOWLIST:
         value = os.environ.get(key)
         if value:
             env[key] = value

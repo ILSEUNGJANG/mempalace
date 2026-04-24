@@ -164,17 +164,18 @@ def _parse_gomod(path: Path) -> Optional[str]:
     return None
 
 
-MANIFEST_PARSERS = {
-    "package.json": _parse_package_json,
-    "pyproject.toml": _parse_pyproject,
-    "Cargo.toml": _parse_cargo,
-    "go.mod": _parse_gomod,
-}
 MANIFEST_PRIORITY = {
     "pyproject.toml": 0,
     "package.json": 1,
     "Cargo.toml": 2,
     "go.mod": 3,
+}
+UNKNOWN_MANIFEST_PRIORITY = 999
+MANIFEST_PARSERS = {
+    "package.json": _parse_package_json,
+    "pyproject.toml": _parse_pyproject,
+    "Cargo.toml": _parse_cargo,
+    "go.mod": _parse_gomod,
 }
 
 
@@ -318,7 +319,7 @@ def _manifest_sort_key(entry: tuple[str, str, Path], repo_root: Path) -> tuple[i
     except ValueError:
         depth = MAX_DEPTH + 1
         rel_str = manifest_dir.as_posix()
-    return (depth, MANIFEST_PRIORITY.get(manifest_file, len(MANIFEST_PRIORITY)), rel_str)
+    return (depth, MANIFEST_PRIORITY.get(manifest_file, UNKNOWN_MANIFEST_PRIORITY), rel_str)
 
 
 def find_git_repos(root: Path, max_depth: int = MAX_DEPTH) -> list[Path]:
