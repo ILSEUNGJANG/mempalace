@@ -27,7 +27,9 @@ from mempalace.project_scanner import (
     to_detected_dict,
 )
 
-GIT_ENV_ALLOWLIST = ("PATH", "HOME", "SystemRoot", "ComSpec", "TMPDIR", "TEMP", "TMP")
+# Keep only a small portability-focused allowlist for git subprocesses in tests.
+GIT_ENV_ALLOWLIST = ("HOME", "SystemRoot", "ComSpec", "TMPDIR", "TEMP", "TMP")
+GIT_EXECUTABLE = shutil.which("git")
 
 
 # ── manifest parsers ────────────────────────────────────────────────────
@@ -219,7 +221,7 @@ def test_find_git_repos_empty_dir(tmp_path):
 
 
 def _require_git() -> None:
-    if shutil.which("git") is None:
+    if GIT_EXECUTABLE is None:
         pytest.skip("git executable not available")
 
 
@@ -237,23 +239,29 @@ def _git_test_env(name: str, email: str) -> dict[str, str]:
     return env
 
 
+def _git(*args: str) -> list[str]:
+    _require_git()
+    assert GIT_EXECUTABLE is not None
+    return [GIT_EXECUTABLE, *args]
+
+
 def _git_commit(
     path: Path, filename: str, content: str, message: str, name: str, email: str
 ) -> None:
     _require_git()
     env = _git_test_env(name, email)
     (path / filename).write_text(content)
-    subprocess.run(["git", "add", filename], cwd=path, check=True, env=env)
-    subprocess.run(["git", "commit", "-q", "-m", message], cwd=path, check=True, env=env)
+    subprocess.run(_git("add", filename), cwd=path, check=True, env=env)
+    subprocess.run(_git("commit", "-q", "-m", message), cwd=path, check=True, env=env)
 
 
 def _init_git_repo(path: Path, name: str = "Jane Doe", email: str = "jane@example.com"):
     """Helper: init a git repo with one commit."""
     _require_git()
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.name", name], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.email", email], cwd=path, check=True)
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=path, check=True)
+    subprocess.run(_git("init", "-q"), cwd=path, check=True)
+    subprocess.run(_git("config", "user.name", name), cwd=path, check=True)
+    subprocess.run(_git("config", "user.email", email), cwd=path, check=True)
+    subprocess.run(_git("config", "commit.gpgsign", "false"), cwd=path, check=True)
     _git_commit(path, "README.md", "hello", "initial", name, email)
 
 

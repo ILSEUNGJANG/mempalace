@@ -170,6 +170,7 @@ MANIFEST_PRIORITY = {
     "Cargo.toml": 2,
     "go.mod": 3,
 }
+# Sentinel so unknown manifests always sort after the known manifest types above.
 UNKNOWN_MANIFEST_PRIORITY = 999
 MANIFEST_PARSERS = {
     "package.json": _parse_package_json,
@@ -311,6 +312,9 @@ def _has_git_marker(path: Path) -> bool:
 
 
 def _manifest_sort_key(entry: tuple[str, str, Path], repo_root: Path) -> tuple[int, int, str]:
+    """Sort manifests by shallowest path first, then known manifest priority,
+    then lexicographic path for deterministic tie-breaking.
+    """
     manifest_file, _project_name, manifest_dir = entry
     try:
         rel = manifest_dir.relative_to(repo_root)
