@@ -28,7 +28,10 @@ from typing import Optional
 try:
     import tomllib  # Python 3.11+
 except ImportError:  # pragma: no cover
-    tomllib = None  # type: ignore
+    try:
+        import tomli as tomllib  # Python 3.9/3.10 backport
+    except ImportError:
+        tomllib = None  # type: ignore
 
 
 SKIP_DIRS = {
@@ -130,7 +133,7 @@ def _parse_toml(path: Path) -> dict:
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
-    except (OSError, Exception):
+    except (OSError, tomllib.TOMLDecodeError):
         return {}
 
 
