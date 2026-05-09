@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.repository == 'MemPalace/mempalace'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -51,7 +52,7 @@ jobs:
           path: website/.vitepress/dist
 
   deploy:
-    if: github.ref_name == 'develop'
+    if: github.ref_name == 'develop' && github.repository == 'MemPalace/mempalace'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
