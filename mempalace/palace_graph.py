@@ -335,11 +335,20 @@ def _fuzzy_match(query: str, nodes: dict, n: int = 5):
 # Explicit tunnels are created by agents when they notice a connection
 # between two specific drawers or rooms in different wings/projects.
 #
-# Stored as a JSON file at ~/.mempalace/tunnels.json so they persist
-# across palace rebuilds (not in ChromaDB which can be recreated).
+# Stored as a JSON file based on MempalaceConfig.palace_path (where the
+# palace itself lives) so they persist across palace rebuilds (not in
+# ChromaDB which can be recreated).
 
 
-_TUNNEL_FILE = os.path.join(os.path.expanduser("~"), ".mempalace", "tunnels.json")
+def _get_tunnel_file(config=None) -> str:
+    """Return the path to the tunnels.json file, derived from MempalaceConfig.palace_path."""
+    config = config or MempalaceConfig()
+    return config.tunnel_file
+
+
+def _legacy_tunnel_file() -> str:
+    """The pre-3.3.6 hardcoded path. Kept only for one-time orphan detection."""
+    return os.path.join(os.path.expanduser("~"), ".mempalace", "tunnels.json")
 
 
 def _load_tunnels():
@@ -347,15 +356,37 @@ def _load_tunnels():
 
     Returns an empty list if the file is missing or corrupt (e.g. truncated
     by a crash mid-write on a system that lacks atomic-rename semantics).
+
+    Backwards-compatibility: prior to 3.3.6 the tunnel file was hardcoded at
+    ``~/.mempalace/tunnels.json`` regardless of the configured palace_path.
+    If the configured tunnel file is missing but a legacy file exists at a
+    different path, log a one-line warning naming both paths so users can
+    move the file manually. We do NOT auto-migrate — auto-merging tunnel
+    state across two locations is too magical for a bugfix and risks
+    clobbering newer data.
     """
-    if not os.path.exists(_TUNNEL_FILE):
-        return []
-    try:
-        with open(_TUNNEL_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return []
-    return data if isinstance(data, list) else []
+    current_tunnel_file = _get_tunnel_file()
+    if os.path.exists(current_tunnel_file):
+        try:
+            with open(current_tunnel_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            logger.warning(
+                "Mempalace tunnels file %r is corrupt or unreadable; starting empty.",
+                current_tunnel_file,
+            )
+            return []
+        return data if isinstance(data, list) else []
+
+    legacy = _legacy_tunnel_file()
+    if legacy != current_tunnel_file and os.path.exists(legacy):
+        logger.warning(
+            "Legacy tunnels file at %r is being ignored; configured location is %r. "
+            "Move or copy the legacy file to the configured path to recover its tunnels.",
+            legacy,
+            current_tunnel_file,
+        )
+    return []
 
 
 def _save_tunnels(tunnels):
@@ -371,14 +402,15 @@ def _save_tunnels(tunnels):
     shared Linux/multi-user systems. Matches the file-permission pattern
     established by #814 for the other sensitive palace files.
     """
-    parent = os.path.dirname(_TUNNEL_FILE)
+    tunnel_file = _get_tunnel_file()
+    parent = os.path.dirname(tunnel_file)
     os.makedirs(parent, exist_ok=True)
     try:
         os.chmod(parent, 0o700)
     except (OSError, NotImplementedError):
         # Windows / unsupported filesystems — tolerate.
         pass
-    tmp_path = _TUNNEL_FILE + ".tmp"
+    tmp_path = tunnel_file + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(tunnels, f, indent=2)
         f.flush()
@@ -387,9 +419,9 @@ def _save_tunnels(tunnels):
         except OSError:
             # Not all filesystems (or Windows file handles) support fsync — tolerate.
             pass
-    os.replace(tmp_path, _TUNNEL_FILE)
+    os.replace(tmp_path, tunnel_file)
     try:
-        os.chmod(_TUNNEL_FILE, 0o600)
+        os.chmod(tunnel_file, 0o600)
     except (OSError, NotImplementedError):
         pass
 
@@ -419,6 +451,30 @@ def _require_name(value: str, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
     return value.strip()
+
+
+def _check_room_exists(wing: str, room: str, col) -> bool:
+    """Check if at least one drawer exists for the given wing/room in ChromaDB."""
+    if col is None:
+        # If collection is unreachable, can't verify, so allow.
+        logger.debug(
+            "ChromaDB collection not reachable, skipping room existence validation for %s/%s",
+            wing,
+            room,
+        )
+        return True
+    try:
+        results = col.get(where={"$and": [{"wing": wing}, {"room": room}]}, limit=1, include=[])
+        return len(results["ids"]) > 0
+    except Exception:
+        # If query fails, assume it's a temporary issue or permissions, and allow.
+        logger.warning(
+            "Error checking room existence in ChromaDB for %s/%s; allowing tunnel creation.",
+            wing,
+            room,
+            exc_info=True,
+        )
+        return True
 
 
 def create_tunnel(
@@ -461,7 +517,8 @@ def create_tunnel(
         The stored tunnel dict.
 
     Raises:
-        ValueError: if any wing or room is empty or non-string.
+        ValueError: if any wing or room is empty or non-string, or if an explicit
+                    tunnel points to a nonexistent room.
 
     Note:
         Wing slugs are stored verbatim — passing ``"my-wing"`` and ``"my_wing"``
@@ -474,6 +531,15 @@ def create_tunnel(
     source_room = _require_name(source_room, "source_room")
     target_wing = _require_name(target_wing, "target_wing")
     target_room = _require_name(target_room, "target_room")
+
+    # Validate room existence for explicit tunnels only. Use the verbatim wing
+    # slugs here so #1504's hyphen-preserving write path remains intact.
+    if kind == "explicit":
+        col = _get_collection()
+        if not _check_room_exists(source_wing, source_room, col):
+            raise ValueError(f"Source room '{source_room}' does not exist in wing '{source_wing}'")
+        if not _check_room_exists(target_wing, target_room, col):
+            raise ValueError(f"Target room '{target_room}' does not exist in wing '{target_wing}'")
 
     tunnel_id = _canonical_tunnel_id(source_wing, source_room, target_wing, target_room)
 
@@ -493,7 +559,7 @@ def create_tunnel(
     # Serialize the load → mutate → save cycle. Without this, two concurrent
     # create_tunnel calls can both read the same snapshot and the later
     # writer silently drops the earlier writer's tunnel.
-    with mine_lock(_TUNNEL_FILE):
+    with mine_lock(_get_tunnel_file()):
         tunnels = _load_tunnels()
         for existing in tunnels:
             if existing.get("id") == tunnel_id:
@@ -535,7 +601,7 @@ def list_tunnels(wing: str = None):
 
 def delete_tunnel(tunnel_id: str):
     """Delete an explicit tunnel by ID. Returns ``{"deleted": <id>}``."""
-    with mine_lock(_TUNNEL_FILE):
+    with mine_lock(_get_tunnel_file()):
         tunnels = _load_tunnels()
         tunnels = [t for t in tunnels if t.get("id") != tunnel_id]
         _save_tunnels(tunnels)

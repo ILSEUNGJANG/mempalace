@@ -733,7 +733,8 @@ def test_mine_creates_topic_tunnels_for_shared_topics(tmp_path, monkeypatch):
     monkeypatch.setattr(miner, "_ENTITY_REGISTRY_PATH", str(registry))
     miner._ENTITY_REGISTRY_CACHE.update({"mtime": None, "names": frozenset(), "raw": {}})
     tunnels_file = tmp_path / "tunnels.json"
-    monkeypatch.setattr(palace_graph, "_TUNNEL_FILE", str(tunnels_file))
+    monkeypatch.setattr(palace_graph, "_get_tunnel_file", lambda *a, **kw: str(tunnels_file))
+    monkeypatch.setattr(palace_graph, "_legacy_tunnel_file", lambda: str(tunnels_file) + ".legacy")
 
     # Pre-populate the registry as if init had been run for two wings that
     # share a topic.
@@ -774,7 +775,8 @@ def test_mine_no_tunnel_when_threshold_blocks_overlap(tmp_path, monkeypatch):
     monkeypatch.setattr(miner, "_ENTITY_REGISTRY_PATH", str(registry))
     miner._ENTITY_REGISTRY_CACHE.update({"mtime": None, "names": frozenset(), "raw": {}})
     tunnels_file = tmp_path / "tunnels.json"
-    monkeypatch.setattr(palace_graph, "_TUNNEL_FILE", str(tunnels_file))
+    monkeypatch.setattr(palace_graph, "_get_tunnel_file", lambda *a, **kw: str(tunnels_file))
+    monkeypatch.setattr(palace_graph, "_legacy_tunnel_file", lambda: str(tunnels_file) + ".legacy")
     monkeypatch.setenv("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", "2")
 
     miner.add_to_known_entities({"topics": ["foo"]}, wing="wing_one")
@@ -804,7 +806,8 @@ def test_mine_no_tunnel_when_only_one_wing_has_topics(tmp_path, monkeypatch):
     monkeypatch.setattr(miner, "_ENTITY_REGISTRY_PATH", str(registry))
     miner._ENTITY_REGISTRY_CACHE.update({"mtime": None, "names": frozenset(), "raw": {}})
     tunnels_file = tmp_path / "tunnels.json"
-    monkeypatch.setattr(palace_graph, "_TUNNEL_FILE", str(tunnels_file))
+    monkeypatch.setattr(palace_graph, "_get_tunnel_file", lambda *a, **kw: str(tunnels_file))
+    monkeypatch.setattr(palace_graph, "_legacy_tunnel_file", lambda: str(tunnels_file) + ".legacy")
 
     miner.add_to_known_entities({"topics": ["foo"]}, wing="wing_one")
 
