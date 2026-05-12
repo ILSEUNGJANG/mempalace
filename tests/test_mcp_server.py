@@ -1431,6 +1431,38 @@ class TestCacheInvalidation:
         assert mcp_server._palace_db_inode == 0
         assert mcp_server._palace_db_mtime == 0.0
 
+    def test_collection_open_failure_resets_db_markers(self, monkeypatch, config, kg):
+        """A failed reopen must not leave inode/mtime markers from a dead client."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        class FailingClient:
+            def get_collection(self, *args, **kwargs):
+                raise RuntimeError("collection unavailable")
+
+        def fake_get_client():
+            mcp_server._client_cache = object()
+            mcp_server._palace_db_inode = 12345
+            mcp_server._palace_db_mtime = 678.9
+            mcp_server._metadata_cache = {"stale": True}
+            mcp_server._metadata_cache_time = 42
+            return FailingClient()
+
+        monkeypatch.setattr(mcp_server, "_get_client", fake_get_client)
+        monkeypatch.setattr(
+            mcp_server.ChromaBackend,
+            "_resolve_embedding_function",
+            staticmethod(lambda: None),
+        )
+
+        assert mcp_server._get_collection() is None
+        assert mcp_server._client_cache is None
+        assert mcp_server._collection_cache is None
+        assert mcp_server._palace_db_inode == 0
+        assert mcp_server._palace_db_mtime == 0.0
+        assert mcp_server._metadata_cache is None
+        assert mcp_server._metadata_cache_time == 0
+
     def test_reconnect_reports_failure_when_no_palace(self, monkeypatch, config, kg):
         """tool_reconnect should report failure when no collection is available."""
         _patch_mcp_server(monkeypatch, config, kg)
