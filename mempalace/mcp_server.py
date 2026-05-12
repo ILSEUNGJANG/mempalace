@@ -378,7 +378,13 @@ def _get_collection(create=False):
     ``quarantine_stale_hnsw`` per #1322), so the second attempt heals the
     common stale-handle / stale-HNSW case automatically.
     """
-    global _client_cache, _collection_cache, _metadata_cache, _metadata_cache_time
+    global \
+        _client_cache, \
+        _collection_cache, \
+        _palace_db_inode, \
+        _palace_db_mtime, \
+        _metadata_cache, \
+        _metadata_cache_time
     for attempt in range(2):
         try:
             client = _get_client()
@@ -445,15 +451,18 @@ def _get_collection(create=False):
                 _config.palace_path,
                 create,
             )
+            _client_cache = None
+            _collection_cache = None
+            _palace_db_inode = 0
+            _palace_db_mtime = 0.0
+            _metadata_cache = None
+            _metadata_cache_time = 0
             if attempt == 0:
                 # Reset all caches so the next attempt forces _get_client()
                 # to rebuild the chromadb client from scratch — that path
                 # re-runs quarantine_stale_hnsw (#1322) and reopens the
                 # collection cleanly, healing the common stale-handle case.
-                _client_cache = None
-                _collection_cache = None
-                _metadata_cache = None
-                _metadata_cache_time = 0
+                continue
     return None
 
 
