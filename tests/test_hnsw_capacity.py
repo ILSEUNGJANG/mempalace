@@ -350,6 +350,23 @@ def test_unflushed_path_also_uses_dynamic_floor(tmp_path):
     info = hnsw_capacity_status(str(tmp_path), COLLECTION)
     assert info["hnsw_count"] is None
     assert info["diverged"] is False, info["message"]
+    assert info["status"] == "ok"
+    assert "pending first HNSW metadata flush" in info["message"]
+
+
+def test_unreadable_hnsw_metadata_stays_unknown(tmp_path):
+    """Unreadable metadata is not the same as a clean pre-flush segment."""
+    seg = "seg-bad-pickle"
+    _seed_chroma_db(str(tmp_path), sqlite_count=30_000, segment_id=seg, sync_threshold=50_000)
+    os.makedirs(os.path.join(str(tmp_path), seg), exist_ok=True)
+    with open(os.path.join(str(tmp_path), seg, "index_metadata.pickle"), "wb") as f:
+        f.write(b"not a pickle")
+
+    info = hnsw_capacity_status(str(tmp_path), COLLECTION)
+
+    assert info["hnsw_count"] is None
+    assert info["status"] == "unknown"
+    assert "metadata is unreadable" in info["message"]
 
 
 # ── BM25-only sqlite fallback ─────────────────────────────────────────
@@ -610,6 +627,18 @@ def test_repair_status_quiet_on_healthy_palace(tmp_path, capsys):
     repair_status(palace_path=str(tmp_path))
     captured = capsys.readouterr().out
     assert "DIVERGED" not in captured
+    assert "Recommended" not in captured
+
+
+def test_repair_status_prints_pending_flush_for_ok_preflush(tmp_path, capsys):
+    from mempalace.repair import status as repair_status
+
+    seg = "seg-status-preflush"
+    _seed_chroma_db(str(tmp_path), sqlite_count=11_162, segment_id=seg, sync_threshold=50_000)
+    repair_status(palace_path=str(tmp_path))
+    captured = capsys.readouterr().out
+    assert "hnsw count:     (pending first metadata flush)" in captured
+    assert "status:         OK" in captured
     assert "Recommended" not in captured
 
 
