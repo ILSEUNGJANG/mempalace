@@ -543,13 +543,33 @@ def hnsw_capacity_status(palace_path: str, collection_name: str = "mempalace_dra
         divergence_floor = max(_HNSW_DIVERGENCE_FALLBACK_FLOOR, 2 * sync_threshold)
 
         if hnsw_count is None:
-            # No pickle yet, so this probe cannot measure HNSW capacity.
+            pickle_path = os.path.join(palace_path, seg_id, "index_metadata.pickle")
+            if os.path.isfile(pickle_path):
+                out["message"] = (
+                    "HNSW capacity unavailable: metadata is unreadable; "
+                    "leaving vector search enabled"
+                )
+                return out
+
+            # No pickle yet, so this probe cannot measure HNSW capacity. With
+            # large sync_threshold values this is expected until the first
+            # flush window completes. Treat that bounded pre-flush state as OK
+            # rather than telling operators an intact, not-yet-flushed palace
+            # is unknown.
+            if sqlite_count <= divergence_floor:
+                out["status"] = "ok"
+                out["message"] = (
+                    "HNSW metadata pending first HNSW metadata flush; "
+                    f"sqlite {sqlite_count:,} is within the {divergence_floor:,} "
+                    "flush-lag tolerance; leaving vector search enabled"
+                )
+                return out
+
             # Chroma 1.5.x can have binary HNSW files without a flushed
             # metadata pickle; absence of the pickle alone is not proof that
             # vector search is unusable or dangerous. Keep the status unknown
-            # so MCP does not globally disable vectors on an inconclusive
-            # signal. Corrupt/invalid metadata, when present, is handled by
-            # quarantine_invalid_hnsw_metadata before Chroma opens.
+            # beyond the expected flush window so MCP does not globally disable
+            # vectors on an inconclusive signal.
             out["message"] = (
                 "HNSW capacity unavailable: metadata has not been flushed; "
                 "leaving vector search enabled"

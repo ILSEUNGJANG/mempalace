@@ -587,9 +587,7 @@ def maybe_repair_poisoned_max_seq_id_before_rebuild(
         "  This can make writes report success while embeddings_queue grows "
         "and embeddings stay static."
     )
-    print(
-        "  Running the non-destructive max_seq_id repair instead of rebuilding " "the collection."
-    )
+    print("  Running the non-destructive max_seq_id repair instead of rebuilding the collection.")
     print(
         "  Queued writes remain in chroma.sqlite3 for Chroma to drain after "
         "the bookmark is unpoisoned."
@@ -1143,7 +1141,10 @@ def status(palace_path=None, collection_name: Optional[str] = None) -> dict:
         else:
             print(f"    sqlite count:   {info['sqlite_count']:,}")
         if info["hnsw_count"] is None:
-            print("    hnsw count:     (no flushed metadata yet)")
+            if info["status"] == "ok":
+                print("    hnsw count:     (pending first metadata flush)")
+            else:
+                print("    hnsw count:     (no flushed metadata yet)")
         else:
             print(f"    hnsw count:     {info['hnsw_count']:,}")
         if info["divergence"] is not None:
