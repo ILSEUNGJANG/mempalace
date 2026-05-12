@@ -9,6 +9,7 @@ via monkeypatch to avoid touching real data.
 from datetime import datetime
 import json
 import os
+import sqlite3
 import sys
 from unittest.mock import MagicMock
 
@@ -38,6 +39,75 @@ def _get_collection(palace_path, create=False):
             client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"}),
         )
     return client, client.get_collection("mempalace_drawers")
+
+
+def _seed_overview_sqlite(palace_path, include_missing_metadata=False):
+    """Seed only the SQLite tables MCP overview tools read."""
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE collections (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE segments (
+                id TEXT PRIMARY KEY,
+                collection TEXT NOT NULL,
+                scope TEXT NOT NULL
+            );
+            CREATE TABLE embeddings (
+                id INTEGER PRIMARY KEY,
+                segment_id TEXT NOT NULL,
+                embedding_id TEXT NOT NULL,
+                seq_id BLOB NOT NULL
+            );
+            CREATE TABLE embedding_metadata (
+                id INTEGER REFERENCES embeddings(id),
+                key TEXT NOT NULL,
+                string_value TEXT,
+                int_value INTEGER,
+                float_value REAL,
+                bool_value INTEGER,
+                PRIMARY KEY (id, key)
+            );
+            """
+        )
+        conn.execute("INSERT INTO collections (id, name) VALUES ('col-test', 'mempalace_drawers')")
+        conn.execute(
+            "INSERT INTO segments (id, collection, scope) VALUES ('seg-vector', 'col-test', 'VECTOR')"
+        )
+        conn.execute(
+            "INSERT INTO segments (id, collection, scope) VALUES ('seg-meta', 'col-test', 'METADATA')"
+        )
+        rows = [
+            (1, "drawer_proj_backend_aaa", "project", "backend"),
+            (2, "drawer_proj_backend_bbb", "project", "backend"),
+            (3, "drawer_proj_frontend_ccc", "project", "frontend"),
+            (4, "drawer_notes_planning_ddd", "notes", "planning"),
+        ]
+        for row_id, drawer_id, wing, room in rows:
+            conn.execute(
+                "INSERT INTO embeddings (id, segment_id, embedding_id, seq_id) VALUES (?, 'seg-meta', ?, ?)",
+                (row_id, drawer_id, b"\x00" * 8),
+            )
+            conn.execute(
+                "INSERT INTO embedding_metadata (id, key, string_value) VALUES (?, 'wing', ?)",
+                (row_id, wing),
+            )
+            conn.execute(
+                "INSERT INTO embedding_metadata (id, key, string_value) VALUES (?, 'room', ?)",
+                (row_id, room),
+            )
+        if include_missing_metadata:
+            conn.execute(
+                "INSERT INTO embeddings (id, segment_id, embedding_id, seq_id) VALUES (?, 'seg-meta', ?, ?)",
+                (5, "drawer_no_metadata", b"\x00" * 8),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ── Protocol Layer ──────────────────────────────────────────────────────
@@ -277,37 +347,54 @@ class TestReadTools:
         assert "project" in result["wings"]
         assert "notes" in result["wings"]
 
+    def test_overview_tools_do_not_open_chroma_collection(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """Overview tools only need sqlite metadata counts.
+
+        They must not open the Chroma collection or materialize every metadata
+        row in Python; doing so makes MCP memory scale with palace size.
+        """
+        _seed_overview_sqlite(palace_path)
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        def fail_open(*_args, **_kwargs):
+            raise AssertionError("overview tool opened Chroma collection")
+
+        monkeypatch.setattr(mcp_server, "_get_collection", fail_open)
+
+        status = mcp_server.tool_status()
+        wings = mcp_server.tool_list_wings()
+        rooms = mcp_server.tool_list_rooms(wing="project")
+        taxonomy = mcp_server.tool_get_taxonomy()
+
+        assert status["total_drawers"] == 4
+        assert status["wings"] == {"notes": 1, "project": 3}
+        assert wings["wings"] == {"notes": 1, "project": 3}
+        assert rooms["rooms"] == {"backend": 2, "frontend": 1}
+        assert taxonomy["taxonomy"]["project"]["backend"] == 2
+
     def test_status_handles_none_metadata_without_partial(
         self, monkeypatch, config, palace_path, kg
     ):
-        """tool_status must not crash or go partial when the metadata cache
-        returns a ``None`` entry — palaces can contain drawers with no
-        metadata (older mining paths, third-party writes). Before the guard,
-        ``m.get("wing")`` raised AttributeError mid-tally and the result
-        carried ``"error"`` + ``"partial": True`` even though the data was
-        perfectly fetchable."""
-        from unittest.mock import patch as _patch
+        """tool_status must not crash or go partial when metadata is absent.
 
+        Palaces can contain drawers with no metadata (older mining paths,
+        third-party writes). They should fall under unknown/unknown.
+        """
+        _seed_overview_sqlite(palace_path, include_missing_metadata=True)
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_status
 
-        # Inject a metadata cache where one entry is None
-        with _patch("mempalace.mcp_server._get_collection") as mock_get_col:
-            fake_col = type("C", (), {"count": lambda self: 2})()
-            mock_get_col.return_value = fake_col
-            with _patch(
-                "mempalace.mcp_server._get_cached_metadata",
-                return_value=[{"wing": "proj", "room": "r"}, None],
-            ):
-                result = tool_status()
+        result = tool_status()
 
-        # The None-metadata drawer falls under 'unknown/unknown' — no crash,
-        # no partial flag.
         assert "error" not in result
         assert result.get("partial") is not True
-        assert result["total_drawers"] == 2
-        assert result["wings"].get("proj") == 1
+        assert result["total_drawers"] == 5
+        assert result["wings"].get("project") == 3
         assert result["wings"].get("unknown") == 1
+        assert result["rooms"].get("unknown") == 1
 
     def test_list_wings(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)

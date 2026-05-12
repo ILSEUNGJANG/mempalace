@@ -523,6 +523,131 @@ def _sanitize_optional_name(value: str = None, field_name: str = "name") -> str:
     return sanitize_name(value, field_name)
 
 
+def _sqlite_overview(
+    wing: str = None,
+    include_total: bool = True,
+    include_wings: bool = True,
+    include_rooms: bool = True,
+    include_taxonomy: bool = True,
+) -> Optional[dict]:
+    """Return count/taxonomy data without opening Chroma or HNSW.
+
+    Overview tools only need metadata counts. Reading them through
+    ``col.get(include=["metadatas"])`` materializes every metadata row in
+    Python and keeps a short-lived process-wide cache. A read-only SQLite
+    aggregate keeps memory bounded and avoids touching the vector segment.
+
+    ``None`` means there is no palace database at the configured path.
+    """
+
+    db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
+    if not os.path.isfile(db_path):
+        return None
+
+    collection_name = _config.collection_name
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            total = 0
+            if include_total:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM embeddings e
+                    JOIN segments s ON e.segment_id = s.id
+                    JOIN collections c ON s.collection = c.id
+                    WHERE c.name = ?
+                    """,
+                    (collection_name,),
+                ).fetchone()
+                total = int(row[0]) if row and row[0] is not None else 0
+
+            wings = {}
+            if include_wings:
+                wings = {
+                    value: int(count)
+                    for value, count in conn.execute(
+                        """
+                        SELECT COALESCE(w.string_value, 'unknown') AS wing, COUNT(*)
+                        FROM embeddings e
+                        JOIN segments s ON e.segment_id = s.id
+                        JOIN collections c ON s.collection = c.id
+                        LEFT JOIN embedding_metadata w
+                          ON w.id = e.id AND w.key = 'wing'
+                        WHERE c.name = ?
+                        GROUP BY wing
+                        ORDER BY wing
+                        """,
+                        (collection_name,),
+                    )
+                }
+
+            rooms = {}
+            if include_rooms:
+                rooms_params: tuple
+                rooms_filter = ""
+                if wing:
+                    rooms_filter = "AND w.string_value = ?"
+                    rooms_params = (collection_name, wing)
+                else:
+                    rooms_params = (collection_name,)
+                rooms = {
+                    value: int(count)
+                    for value, count in conn.execute(
+                        f"""
+                        SELECT COALESCE(r.string_value, 'unknown') AS room, COUNT(*)
+                        FROM embeddings e
+                        JOIN segments s ON e.segment_id = s.id
+                        JOIN collections c ON s.collection = c.id
+                        LEFT JOIN embedding_metadata w
+                          ON w.id = e.id AND w.key = 'wing'
+                        LEFT JOIN embedding_metadata r
+                          ON r.id = e.id AND r.key = 'room'
+                        WHERE c.name = ?
+                        {rooms_filter}
+                        GROUP BY room
+                        ORDER BY room
+                        """,
+                        rooms_params,
+                    )
+                }
+
+            taxonomy: dict[str, dict[str, int]] = {}
+            if include_taxonomy:
+                for wing_name, room_name, count in conn.execute(
+                    """
+                    SELECT
+                      COALESCE(w.string_value, 'unknown') AS wing,
+                      COALESCE(r.string_value, 'unknown') AS room,
+                      COUNT(*)
+                    FROM embeddings e
+                    JOIN segments s ON e.segment_id = s.id
+                    JOIN collections c ON s.collection = c.id
+                    LEFT JOIN embedding_metadata w
+                      ON w.id = e.id AND w.key = 'wing'
+                    LEFT JOIN embedding_metadata r
+                      ON r.id = e.id AND r.key = 'room'
+                    WHERE c.name = ?
+                    GROUP BY wing, room
+                    ORDER BY wing, room
+                    """,
+                    (collection_name,),
+                ):
+                    taxonomy.setdefault(wing_name, {})[room_name] = int(count)
+
+            return {
+                "total_drawers": total,
+                "wings": wings,
+                "rooms": rooms,
+                "taxonomy": taxonomy,
+            }
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.exception("sqlite overview read failed")
+        return {"error": str(exc), "partial": True}
+
+
 # ==================== READ TOOLS ====================
 
 
@@ -535,55 +660,14 @@ def _tool_status_via_sqlite() -> dict:
     gets a working status response — and crucially the
     ``vector_disabled`` flag — without us touching the vector segment.
     """
-    import sqlite3 as _sqlite3
-
-    db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
-    if not os.path.isfile(db_path):
+    overview = _sqlite_overview(include_taxonomy=False)
+    if overview is None:
         return _no_palace()
-    collection_name = _config.collection_name
-
-    wings: dict = {}
-    rooms: dict = {}
-    total = 0
-    try:
-        conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            row = conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM embeddings e
-                JOIN segments s ON e.segment_id = s.id
-                JOIN collections c ON s.collection = c.id
-                WHERE c.name = ?
-                """,
-                (collection_name,),
-            ).fetchone()
-            total = int(row[0]) if row and row[0] is not None else 0
-            for key, target in (("wing", wings), ("room", rooms)):
-                for value, count in conn.execute(
-                    """
-                    SELECT em.string_value, COUNT(*)
-                    FROM embedding_metadata em
-                    JOIN embeddings e ON em.id = e.id
-                    JOIN segments s ON e.segment_id = s.id
-                    JOIN collections c ON s.collection = c.id
-                    WHERE c.name = ?
-                      AND em.key = ?
-                      AND em.string_value IS NOT NULL
-                    GROUP BY em.string_value
-                    """,
-                    (collection_name, key),
-                ):
-                    target[value] = count
-        finally:
-            conn.close()
-    except _sqlite3.Error:
-        logger.exception("tool_status sqlite fallback read failed")
 
     result = {
-        "total_drawers": total,
-        "wings": wings,
-        "rooms": rooms,
+        "total_drawers": overview.get("total_drawers", 0),
+        "wings": overview.get("wings", {}),
+        "rooms": overview.get("rooms", {}),
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
         "vector_disabled": True,
@@ -603,39 +687,23 @@ def tool_status():
     # #1222 failure mode, opening the persistent client to call .count()
     # can segfault — short-circuit to a pure-sqlite path when divergence
     # is detected so status stays reachable.
-    db_exists = os.path.isfile(os.path.join(_config.palace_path, "chroma.sqlite3"))
     _refresh_vector_disabled_flag()
 
     if _vector_disabled:
         return _tool_status_via_sqlite()
 
-    # Use create=True only when a palace DB already exists on disk -- this
-    # bootstraps the ChromaDB collection on a valid-but-empty palace without
-    # accidentally creating a palace in a non-existent directory (#830).
-    col = _get_collection(create=db_exists)
-    if not col:
+    overview = _sqlite_overview(include_taxonomy=False)
+    if overview is None:
         return _no_palace()
-    count = col.count()
-    wings = {}
-    rooms = {}
     result = {
-        "total_drawers": count,
-        "wings": wings,
-        "rooms": rooms,
+        "total_drawers": overview.get("total_drawers", 0),
+        "wings": overview.get("wings", {}),
+        "rooms": overview.get("rooms", {}),
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
     }
-    try:
-        all_meta = _get_cached_metadata(col)
-        for m in all_meta:
-            m = m or {}
-            w = m.get("wing", "unknown")
-            r = m.get("room", "unknown")
-            wings[w] = wings.get(w, 0) + 1
-            rooms[r] = rooms.get(r, 0) + 1
-    except Exception as e:
-        logger.exception("tool_status metadata fetch failed")
-        result["error"] = str(e)
+    if overview.get("error"):
+        result["error"] = overview["error"]
         result["partial"] = True
     return result
 
@@ -674,20 +742,12 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight."""
 
 
 def tool_list_wings():
-    col = _get_collection()
-    if not col:
+    overview = _sqlite_overview(include_total=False, include_rooms=False, include_taxonomy=False)
+    if overview is None:
         return _no_palace()
-    wings = {}
-    result = {"wings": wings}
-    try:
-        all_meta = _get_cached_metadata(col)
-        for m in all_meta:
-            m = m or {}
-            w = m.get("wing", "unknown")
-            wings[w] = wings.get(w, 0) + 1
-    except Exception as e:
-        logger.exception("tool_list_wings metadata fetch failed")
-        result["error"] = str(e)
+    result = {"wings": overview.get("wings", {})}
+    if overview.get("error"):
+        result["error"] = overview["error"]
         result["partial"] = True
     return result
 
@@ -697,43 +757,28 @@ def tool_list_rooms(wing: str = None):
         wing = _sanitize_optional_name(wing, "wing")
     except ValueError as e:
         return {"error": str(e)}
-    col = _get_collection()
-    if not col:
+    overview = _sqlite_overview(
+        wing=wing,
+        include_total=False,
+        include_wings=False,
+        include_taxonomy=False,
+    )
+    if overview is None:
         return _no_palace()
-    rooms = {}
-    result = {"wing": wing or "all", "rooms": rooms}
-    try:
-        where = {"wing": wing} if wing else None
-        all_meta = _fetch_all_metadata(col, where=where)
-        for m in all_meta:
-            m = m or {}
-            r = m.get("room", "unknown")
-            rooms[r] = rooms.get(r, 0) + 1
-    except Exception as e:
-        logger.exception("tool_list_rooms metadata fetch failed")
-        result["error"] = str(e)
+    result = {"wing": wing or "all", "rooms": overview.get("rooms", {})}
+    if overview.get("error"):
+        result["error"] = overview["error"]
         result["partial"] = True
     return result
 
 
 def tool_get_taxonomy():
-    col = _get_collection()
-    if not col:
+    overview = _sqlite_overview(include_total=False, include_wings=False, include_rooms=False)
+    if overview is None:
         return _no_palace()
-    taxonomy = {}
-    result = {"taxonomy": taxonomy}
-    try:
-        all_meta = _get_cached_metadata(col)
-        for m in all_meta:
-            m = m or {}
-            w = m.get("wing", "unknown")
-            r = m.get("room", "unknown")
-            if w not in taxonomy:
-                taxonomy[w] = {}
-            taxonomy[w][r] = taxonomy[w].get(r, 0) + 1
-    except Exception as e:
-        logger.exception("tool_get_taxonomy metadata fetch failed")
-        result["error"] = str(e)
+    result = {"taxonomy": overview.get("taxonomy", {})}
+    if overview.get("error"):
+        result["error"] = overview["error"]
         result["partial"] = True
     return result
 
