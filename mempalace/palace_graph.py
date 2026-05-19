@@ -351,7 +351,7 @@ def _legacy_tunnel_file() -> str:
     return os.path.join(os.path.expanduser("~"), ".mempalace", "tunnels.json")
 
 
-def _load_tunnels():
+def _load_tunnels(config=None):
     """Load explicit tunnels from disk.
 
     Returns an empty list if the file is missing or corrupt (e.g. truncated
@@ -364,15 +364,19 @@ def _load_tunnels():
     move the file manually. We do NOT auto-migrate — auto-merging tunnel
     state across two locations is too magical for a bugfix and risks
     clobbering newer data.
+
+    ``config`` may be passed in by the caller to avoid re-instantiating
+    ``MempalaceConfig`` (which re-reads ``mempalace.yaml`` from disk) on
+    every helper call within a single create_tunnel cycle.
     """
-    current_tunnel_file = _get_tunnel_file()
+    current_tunnel_file = _get_tunnel_file(config)
     if os.path.exists(current_tunnel_file):
         try:
             with open(current_tunnel_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
             logger.warning(
-                "Mempalace tunnels file %r is corrupt or unreadable; starting empty.",
+                "Mempalace tunnels file '%s' is corrupt or unreadable; starting empty.",
                 current_tunnel_file,
             )
             return []
@@ -381,7 +385,7 @@ def _load_tunnels():
     legacy = _legacy_tunnel_file()
     if legacy != current_tunnel_file and os.path.exists(legacy):
         logger.warning(
-            "Legacy tunnels file at %r is being ignored; configured location is %r. "
+            "Legacy tunnels file at '%s' is being ignored; configured location is '%s'. "
             "Move or copy the legacy file to the configured path to recover its tunnels.",
             legacy,
             current_tunnel_file,
@@ -389,7 +393,7 @@ def _load_tunnels():
     return []
 
 
-def _save_tunnels(tunnels):
+def _save_tunnels(tunnels, config=None):
     """Persist explicit tunnels atomically.
 
     Writes to ``tunnels.json.tmp`` then ``os.replace``s it into place, so
@@ -401,8 +405,11 @@ def _save_tunnels(tunnels):
     the user has explicitly linked) and should not be world-readable on
     shared Linux/multi-user systems. Matches the file-permission pattern
     established by #814 for the other sensitive palace files.
+
+    ``config`` may be passed in by the caller to avoid re-instantiating
+    ``MempalaceConfig`` on every save.
     """
-    tunnel_file = _get_tunnel_file()
+    tunnel_file = _get_tunnel_file(config)
     parent = os.path.dirname(tunnel_file)
     os.makedirs(parent, exist_ok=True)
     try:
@@ -532,10 +539,17 @@ def create_tunnel(
     target_wing = _require_name(target_wing, "target_wing")
     target_room = _require_name(target_room, "target_room")
 
+    # Single MempalaceConfig() per call — reused by _get_tunnel_file /
+    # _load_tunnels / _save_tunnels below. Each MempalaceConfig() re-reads
+    # mempalace.yaml from disk; before this change the helpers each
+    # instantiated their own, triggering several redundant disk reads per
+    # create_tunnel call (flagged by gemini-code-assist on #1469).
+    config = MempalaceConfig()
+
     # Validate room existence for explicit tunnels only. Use the verbatim wing
     # slugs here so #1504's hyphen-preserving write path remains intact.
     if kind == "explicit":
-        col = _get_collection()
+        col = _get_collection(config)
         if not _check_room_exists(source_wing, source_room, col):
             raise ValueError(f"Source room '{source_room}' does not exist in wing '{source_wing}'")
         if not _check_room_exists(target_wing, target_room, col):
@@ -559,8 +573,8 @@ def create_tunnel(
     # Serialize the load → mutate → save cycle. Without this, two concurrent
     # create_tunnel calls can both read the same snapshot and the later
     # writer silently drops the earlier writer's tunnel.
-    with mine_lock(_get_tunnel_file()):
-        tunnels = _load_tunnels()
+    with mine_lock(_get_tunnel_file(config)):
+        tunnels = _load_tunnels(config)
         for existing in tunnels:
             if existing.get("id") == tunnel_id:
                 # Preserve original creation timestamp on label updates.
@@ -568,10 +582,10 @@ def create_tunnel(
                 tunnel["updated_at"] = datetime.now(timezone.utc).isoformat()
                 existing.clear()
                 existing.update(tunnel)
-                _save_tunnels(tunnels)
+                _save_tunnels(tunnels, config)
                 return existing
         tunnels.append(tunnel)
-        _save_tunnels(tunnels)
+        _save_tunnels(tunnels, config)
     return tunnel
 
 
