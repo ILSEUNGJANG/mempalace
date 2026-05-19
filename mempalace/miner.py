@@ -1294,8 +1294,9 @@ def _mine_impl(
                     chunk_overlap=cfg_chunk_overlap,
                     min_chunk_size=cfg_min_chunk_size,
                     # Pass the already-resolved int so ``process_file``'s
-                    # in-resolver fast-path short-circuits; otherwise a
-                    # malformed env var would emit its warning per file.
+                    # ``override is not None`` branch skips the env re-read;
+                    # otherwise a malformed env var would emit its warning
+                    # per file.
                     max_chunks_per_file=effective_chunk_cap,
                 )
             except KeyboardInterrupt:
@@ -1351,9 +1352,11 @@ def _mine_impl(
         )
         print(f"  {residual_label}: {max(0, files_skipped - files_skipped_chunk_cap)}")
         if files_skipped_chunk_cap > 0:
-            cap_desc = f"cap {effective_chunk_cap}" if effective_chunk_cap > 0 else "cap disabled"
+            # ``effective_chunk_cap`` is necessarily > 0 here: ``process_file``
+            # only emits the ``"chunk_cap"`` skip_reason when its own
+            # ``effective_cap > 0`` guard passes (see ``process_file``).
             print(
-                f"  Files skipped (chunk {cap_desc}): {files_skipped_chunk_cap} "
+                f"  Files skipped (chunk cap {effective_chunk_cap}): {files_skipped_chunk_cap} "
                 f"(raise via --max-chunks-per-file or MEMPALACE_MAX_CHUNKS_PER_FILE; "
                 f"set 0 to disable)"
             )
