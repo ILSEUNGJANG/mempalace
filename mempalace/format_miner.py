@@ -163,6 +163,7 @@ class ExtractionStatus(enum.Enum):
     SKIP_BROKEN_SYMLINK = "skip:broken_symlink"
     SKIP_UNRECOGNIZED = "skip:unrecognized"
     SKIP_EXTRACTION_ERROR = "skip:extraction_error"
+    SKIP_MISSING_FORMAT_DEPS = "skip:missing_format_deps"
     SKIP_NETWORK_TIMEOUT = "skip:network_timeout"
     SKIP_UNREADABLE = "skip:unreadable"
 
@@ -381,6 +382,22 @@ def extract_text(
         logger.info("skip:permission %s", p)
         return None, ExtractionStatus.SKIP_PERMISSION
     except Exception as exc:
+        # Fringe Case 14 (PR #1555 review, Igor): MarkItDown raises
+        # ``MissingDependencyException`` when a per-format sub-extra
+        # (e.g. ``markitdown[pdf]``) isn't installed. Surface this as a
+        # distinct status so users see the actionable signal instead of
+        # the generic SKIP_EXTRACTION_ERROR. Match by type name (not
+        # isinstance) so the catch fires without requiring markitdown to
+        # be import-resolvable at module load — keeps the static-import
+        # surface unchanged.
+        if type(exc).__name__ == "MissingDependencyException":
+            logger.warning(
+                "skip:missing_format_deps %s — %s: %s",
+                p,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return None, ExtractionStatus.SKIP_MISSING_FORMAT_DEPS
         # Fringe Case 4 vs Case 10: encrypted vs generic crash, by message.
         msg = str(exc)
         if _ENCRYPTED_PATTERNS.search(msg):

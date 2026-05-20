@@ -30,6 +30,23 @@ from mempalace.format_miner import (  # noqa: E402
 )
 
 
+def _make_symlink_or_skip(link: Path, target: Path) -> None:
+    """Create ``link`` pointing to ``target``, or ``pytest.skip`` when the
+    platform/process can't create symlinks.
+
+    Windows without ``SeCreateSymbolicLinkPrivilege`` raises ``OSError``
+    (``WinError 1314``) from ``Path.symlink_to()`` BEFORE any product code
+    runs, which surfaces as a hard test failure even though the failure
+    has nothing to do with the code under test. Per PR #1555 review (Igor):
+    symlink tests must skip cleanly in environments without privileges
+    rather than fail spuriously.
+    """
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation not permitted on this platform/user: {exc}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Module surface
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,6 +80,7 @@ def test_extraction_status_enum_has_all_documented_codes():
         "SKIP_BROKEN_SYMLINK",
         "SKIP_UNRECOGNIZED",
         "SKIP_EXTRACTION_ERROR",
+        "SKIP_MISSING_FORMAT_DEPS",
         "SKIP_NETWORK_TIMEOUT",
         "SKIP_UNREADABLE",
     }
@@ -190,7 +208,7 @@ def test_fringe_permission_denied(tmp_path: Path):
 def test_fringe_broken_symlink(tmp_path: Path):
     target = tmp_path / "does-not-exist.pdf"
     link = tmp_path / "broken-link.pdf"
-    link.symlink_to(target)
+    _make_symlink_or_skip(link, target)
     assert link.is_symlink()
     text, status = extract_text(link)
     assert text is None
@@ -865,7 +883,7 @@ def test_scan_formats_skips_symlinks(tmp_path: Path):
     real = tmp_path / "real.pdf"
     real.write_bytes(b"%PDF-1.4 stub")
     link = tmp_path / "alias.pdf"
-    link.symlink_to(real)
+    _make_symlink_or_skip(link, real)
     found = {f.name for f in scan_formats(tmp_path)}
     assert "real.pdf" in found
     assert "alias.pdf" not in found
@@ -1137,3 +1155,80 @@ def test_mine_formats_tunnel_failure_does_not_crash_mine(_mine_formats_mocks):
     ):
         # Must NOT raise
         mine_formats(format_dir=str(tmp), palace_path=str(tmp / "palace"), wing="wing_aya")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PR #1555 review (Igor) — missing-format-deps surfacing + pyproject extras
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_extract_text_missing_format_dep_returns_distinct_status(tmp_path: Path, monkeypatch):
+    """A MarkItDown ``MissingDependencyException`` (raised when a per-format
+    sub-extra like ``markitdown[pdf]`` isn't installed) must surface as
+    ``SKIP_MISSING_FORMAT_DEPS`` — NOT the generic ``SKIP_EXTRACTION_ERROR``.
+
+    Per PR #1555 review (Igor): real PDFs hit this in production today
+    and users see "extraction error" with no signal that the fix is
+    ``pip install markitdown[pdf]``. The dispatcher must catch by type
+    name so the real markitdown package doesn't have to be import-
+    resolvable for the catch to fire.
+    """
+    from mempalace import format_miner
+
+    # Build a fake exception class with the right __name__ so the
+    # type-name catch in extract_text recognises it without requiring
+    # the real markitdown to be installed in the test environment.
+    class MissingDependencyException(Exception):
+        pass
+
+    def fake_extract(p):
+        raise MissingDependencyException(
+            "MarkItDown failed: install with `pip install markitdown[pdf]`"
+        )
+
+    monkeypatch.setattr(format_miner, "_extract_via_markitdown", fake_extract)
+
+    pdf = tmp_path / "fake.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+
+    text, status = extract_text(pdf)
+    assert text is None
+    assert status == ExtractionStatus.SKIP_MISSING_FORMAT_DEPS, (
+        f"expected SKIP_MISSING_FORMAT_DEPS, got {status}"
+    )
+
+
+def test_pyproject_extract_extra_pulls_markitdown_format_subdeps():
+    """The ``mempalace[extract]`` extra must include MarkItDown's per-format
+    sub-extras (``pdf``, ``docx``, ``pptx``, ``xlsx``) — without them, real
+    PDF/DOCX/etc files hit ``MissingDependencyException`` at runtime even
+    after ``pip install mempalace[extract]``. Per PR #1555 review (Igor).
+
+    ``.rtf`` is covered by the separate ``striprtf`` dependency and ``.epub``
+    ships in base MarkItDown (``EpubConverter`` uses ``beautifulsoup4``
+    which is a base requirement, not extra-gated), so neither needs a
+    sub-extra here.
+    """
+    try:
+        import tomllib  # 3.11+
+    except ImportError:  # pragma: no cover — only hit on 3.9/3.10
+        import tomli as tomllib  # type: ignore[import-not-found, no-redef]
+
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    with open(pyproject_path, "rb") as f:
+        data = tomllib.load(f)
+
+    extract = data["project"]["optional-dependencies"]["extract"]
+    extract_str = " ".join(extract).lower()
+
+    # Accept any layout — comma-separated ``markitdown[docx,pdf,pptx,xlsx]``
+    # or separate ``markitdown[pdf]`` entries — as long as each format
+    # appears inside SOME ``markitdown[...]`` bracketed group.
+    import re
+
+    bracketed = "".join(re.findall(r"markitdown\[([^\]]+)\]", extract_str))
+    for sub in ("pdf", "docx", "pptx", "xlsx"):
+        assert sub in bracketed, (
+            f"[extract] must include markitdown[{sub}]; "
+            f"got bracketed extras: {bracketed!r}; full extract: {extract}"
+        )
