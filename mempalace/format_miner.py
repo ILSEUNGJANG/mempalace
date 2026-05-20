@@ -63,6 +63,7 @@ import hashlib
 import logging
 import os
 import re
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +75,15 @@ from .palace import (
     file_already_mined,
     get_collection,
     mine_lock,
+)
+
+# Module-level imports from .miner so tests can patch them via
+# mempalace.format_miner.<name>. Lazy imports inside functions would not
+# expose these as attributes of this module, breaking the test seams.
+from .miner import (
+    _compute_topic_tunnels_for_wing,
+    detect_room,
+    load_config,
 )
 
 __all__ = [
@@ -627,6 +637,32 @@ def mine_formats(
     if not wing:
         wing = normalize_wing_name(format_path.name)
 
+    # Load the project's mempalace.yaml (rooms list + wing override) so
+    # detect_room has real categories to route into. Mirrors miner.py:1154.
+    # Fall back to a single "documents" room if no config exists — keeps the
+    # detector well-defined without forcing a yaml on every format dir.
+    try:
+        project_config = load_config(format_dir)
+        rooms = project_config.get(
+            "rooms",
+            [
+                {
+                    "name": "documents",
+                    "description": "All format-mined files",
+                    "keywords": ["documents"],
+                }
+            ],
+        )
+    except Exception:
+        logger.debug("mine_formats: load_config fallback to default rooms", exc_info=True)
+        rooms = [
+            {
+                "name": "documents",
+                "description": "All format-mined files",
+                "keywords": ["documents"],
+            }
+        ]
+
     files = scan_formats(format_dir)
     if limit > 0:
         files = files[:limit]
@@ -685,7 +721,10 @@ def mine_formats(
                     print(f"  - [{i:4}/{len(files)}] {filepath.name[:50]:50} EMPTY_AFTER_CHUNK")
                     continue
 
-                room = "documents"  # all format-mined drawers land in the "documents" room
+                # Route this drawer to a room — same detect_room miner.py
+                # uses (folder match → filename match → content keyword
+                # scoring → fallback "general"). Mirrors miner.py:904.
+                room = detect_room(filepath, text, rooms, format_path)
                 files_with_text += 1
 
                 if dry_run:
@@ -726,6 +765,26 @@ def mine_formats(
         # Partial progress is safe — deterministic drawer IDs mean a re-mine
         # upserts to the same rows. Print a clean summary and exit.
         print("\n  Mine interrupted by user (Ctrl-C).")
+    else:
+        # All files processed without interruption — compute cross-wing topic
+        # tunnels linking this wing to others that share confirmed topics.
+        # Mirrors miner.py:1241-1249 exactly: tunnel-compute failures must
+        # never fail a mine, so any exception is logged and skipped quietly.
+        if not dry_run:
+            try:
+                tunnels_added = _compute_topic_tunnels_for_wing(wing)
+                if tunnels_added:
+                    print(f"\n  Topic tunnels: +{tunnels_added} cross-wing link(s)")
+            except Exception as exc:
+                logger.warning(
+                    "mine_formats: topic tunnel computation skipped — %s: %s",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+                print(
+                    f"\n  WARNING: topic tunnel computation skipped — {exc}",
+                    file=sys.stderr,
+                )
     finally:
         # Hook-spawned mines write a PID file that miner.py's
         # _cleanup_mine_pid_file() clears; we mirror that so format-mode

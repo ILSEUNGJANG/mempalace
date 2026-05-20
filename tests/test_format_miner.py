@@ -988,3 +988,152 @@ def test_mine_formats_continues_after_per_file_error(_mine_formats_mocks):
     assert non_sentinel_upserts, (
         "the good file should still have produced a content upsert after the bad file errored"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Amendment #3 — parity with miner.py: detect_room + tunnel computation.
+# Tests written FIRST (TDD) to prove the gaps exist, then format_miner.py is
+# amended to make them pass. Pattern mirrors miner.py exactly.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_mine_formats_calls_load_config_for_rooms(_mine_formats_mocks):
+    """mine_formats must load mempalace.yaml (via load_config) to get the
+    rooms list — same as miner.py:1154. Without this, drawers fall back to
+    a single 'documents' room."""
+    from unittest.mock import patch
+    from mempalace.format_miner import mine_formats
+
+    tmp = _mine_formats_mocks["tmp_path"]
+    f = tmp / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4 stub")
+    fake_config = {
+        "wing": "wing_aya",
+        "rooms": [{"name": "documents", "keywords": ["documents"]}],
+    }
+    with (
+        patch("mempalace.format_miner.scan_formats", return_value=[f]),
+        patch("mempalace.format_miner._extract_via_markitdown", return_value="long " * 50),
+        patch("mempalace.format_miner.load_config", return_value=fake_config) as p_cfg,
+    ):
+        mine_formats(format_dir=str(tmp), palace_path=str(tmp / "palace"))
+    p_cfg.assert_called_once()
+
+
+def test_mine_formats_calls_detect_room_per_file(_mine_formats_mocks):
+    """mine_formats must call detect_room(filepath, content, rooms, project_path)
+    for each file — same as miner.py:904. Hardcoding room='documents' is the
+    bug; this test fails until detect_room is wired in."""
+    from unittest.mock import patch
+    from mempalace.format_miner import mine_formats
+
+    tmp = _mine_formats_mocks["tmp_path"]
+    f = tmp / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4 stub")
+    fake_config = {
+        "wing": "wing_aya",
+        "rooms": [{"name": "documents", "keywords": ["documents"]}],
+    }
+    with (
+        patch("mempalace.format_miner.scan_formats", return_value=[f]),
+        patch("mempalace.format_miner._extract_via_markitdown", return_value="long " * 50),
+        patch("mempalace.format_miner.load_config", return_value=fake_config),
+        patch("mempalace.format_miner.detect_room", return_value="family") as p_room,
+    ):
+        mine_formats(format_dir=str(tmp), palace_path=str(tmp / "palace"))
+    p_room.assert_called_once()
+    # First positional arg should be the file Path; last arg should be project_path
+    call_args = p_room.call_args
+    # detect_room(filepath, content, rooms, project_path)
+    assert len(call_args.args) == 4 or "filepath" in call_args.kwargs
+
+
+def test_mine_formats_uses_detected_room_in_drawer_metadata(_mine_formats_mocks):
+    """The room field on the drawer metadata must reflect what detect_room
+    returned, NOT the hardcoded 'documents'. This is the visible bug from
+    the 2026-05-19 mine: every drawer landed in room='documents'."""
+    from unittest.mock import patch
+    from mempalace.format_miner import mine_formats
+
+    tmp = _mine_formats_mocks["tmp_path"]
+    f = tmp / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4 stub")
+    fake_config = {
+        "wing": "wing_aya",
+        "rooms": [{"name": "family", "keywords": ["family"]}],
+    }
+    with (
+        patch("mempalace.format_miner.scan_formats", return_value=[f]),
+        patch("mempalace.format_miner._extract_via_markitdown", return_value="long " * 50),
+        patch("mempalace.format_miner.load_config", return_value=fake_config),
+        patch("mempalace.format_miner.detect_room", return_value="family"),
+    ):
+        mine_formats(format_dir=str(tmp), palace_path=str(tmp / "palace"))
+    upsert_calls = _mine_formats_mocks["collection"].upsert.call_args_list
+    found_room = None
+    for call in upsert_calls:
+        metas = call.kwargs.get("metadatas") or call.args[2]
+        for m in metas:
+            if m.get("is_sentinel"):
+                continue
+            found_room = m.get("room")
+            break
+        if found_room:
+            break
+    assert found_room == "family", (
+        f"drawer room must be 'family' (detect_room's return), not {found_room!r}"
+    )
+
+
+def test_mine_formats_calls_compute_topic_tunnels_after_loop(_mine_formats_mocks):
+    """After the per-file loop, mine_formats must call
+    _compute_topic_tunnels_for_wing(wing) exactly once. Mirrors miner.py:1241.
+    Without this, cross-wing topic tunnels never materialize for format-mined
+    wings (audit confirmed 0 tunnels in the 2026-05-19 v6 mine)."""
+    from unittest.mock import patch
+    from mempalace.format_miner import mine_formats
+
+    tmp = _mine_formats_mocks["tmp_path"]
+    f = tmp / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4 stub")
+    fake_config = {
+        "wing": "wing_aya",
+        "rooms": [{"name": "documents", "keywords": ["documents"]}],
+    }
+    with (
+        patch("mempalace.format_miner.scan_formats", return_value=[f]),
+        patch("mempalace.format_miner._extract_via_markitdown", return_value="long " * 50),
+        patch("mempalace.format_miner.load_config", return_value=fake_config),
+        patch("mempalace.format_miner.detect_room", return_value="documents"),
+        patch("mempalace.format_miner._compute_topic_tunnels_for_wing", return_value=0) as p_tun,
+    ):
+        mine_formats(format_dir=str(tmp), palace_path=str(tmp / "palace"), wing="wing_aya")
+    p_tun.assert_called_once_with("wing_aya")
+
+
+def test_mine_formats_tunnel_failure_does_not_crash_mine(_mine_formats_mocks):
+    """If _compute_topic_tunnels_for_wing raises, the mine must still
+    complete (summary still prints, no exception propagates). Mirrors the
+    try/except wrap at miner.py:1244-1249."""
+    from unittest.mock import patch
+    from mempalace.format_miner import mine_formats
+
+    tmp = _mine_formats_mocks["tmp_path"]
+    f = tmp / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4 stub")
+    fake_config = {
+        "wing": "wing_aya",
+        "rooms": [{"name": "documents", "keywords": ["documents"]}],
+    }
+    with (
+        patch("mempalace.format_miner.scan_formats", return_value=[f]),
+        patch("mempalace.format_miner._extract_via_markitdown", return_value="long " * 50),
+        patch("mempalace.format_miner.load_config", return_value=fake_config),
+        patch("mempalace.format_miner.detect_room", return_value="documents"),
+        patch(
+            "mempalace.format_miner._compute_topic_tunnels_for_wing",
+            side_effect=RuntimeError("simulated tunnel-compute failure"),
+        ),
+    ):
+        # Must NOT raise
+        mine_formats(format_dir=str(tmp), palace_path=str(tmp / "palace"), wing="wing_aya")
