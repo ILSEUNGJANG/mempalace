@@ -793,6 +793,7 @@ def test_maybe_auto_ingest_skips_when_mine_running(tmp_path):
                 pid_file = _pid_file_for_cmd(cmd)
                 pid_file.parent.mkdir(parents=True, exist_ok=True)
                 import time as _time
+
                 pid_file.write_text(f"{os.getpid()} {int(_time.time())}")
                 with patch("mempalace.hooks_cli._mempalace_python", return_value=sys.executable):
                     with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
@@ -986,6 +987,7 @@ def test_ingest_transcript_skips_when_target_running(tmp_path):
                 pid_file = _pid_file_for_cmd(expected_cmd)
                 pid_file.parent.mkdir(parents=True, exist_ok=True)
                 import time as _time
+
                 pid_file.write_text(f"{os.getpid()} {int(_time.time())}")  # live target, fresh
 
                 with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
