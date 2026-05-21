@@ -280,3 +280,123 @@ class TestHallwayQuery:
         _use_tmp_hallway_file(monkeypatch, tmp_path)
         hallways_mod._save_hallways([{"id": "h1", "wing": "wing_aya"}])
         assert hallways_mod.delete_hallway("nonexistent") is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# L7 dynamics integration — hallway records carry strength/stability/etc
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHallwayDynamicsIntegration:
+    """Hallway records produced by ``compute_hallways_for_wing`` must carry
+    the L7 dynamics fields (strength, stability, last_activated, access_count)
+    so the living-connection math in ``mempalace.dynamics`` can operate on
+    them. Plus: recomputing the same wing must PRESERVE accumulated dynamics
+    rather than reset them — otherwise every mine wipes the connection
+    weights and L7 is undermined."""
+
+    def test_new_hallway_record_carries_all_dynamics_fields(self, tmp_path, monkeypatch):
+        from mempalace.dynamics import DEFAULT_STABILITY, DEFAULT_STRENGTH
+
+        _use_tmp_hallway_file(monkeypatch, tmp_path)
+        col = _fake_collection(
+            [
+                {"wing": "wing_aya", "room": "diary", "entities": "Aya;Lumi"},
+                {"wing": "wing_aya", "room": "letters", "entities": "Aya;Lumi"},
+            ]
+        )
+        created = hallways_mod.compute_hallways_for_wing("wing_aya", col=col, min_count=2)
+        assert created, "expected at least one hallway record"
+        for h in created:
+            assert h["strength"] == DEFAULT_STRENGTH, (
+                f"new hallway should carry default strength; got {h}"
+            )
+            assert h["stability"] == DEFAULT_STABILITY, (
+                f"new hallway should carry default stability; got {h}"
+            )
+            assert h["access_count"] == 0, f"new hallway should start at access_count=0; got {h}"
+            assert "last_activated" in h, f"new hallway must carry last_activated; got {h}"
+            # last_activated should anchor to created_at so decay starts from
+            # creation, not from recompute-time.
+            assert h["last_activated"] == h["created_at"]
+
+    def test_recompute_preserves_accumulated_strength(self, tmp_path, monkeypatch):
+        """If a hallway has been potentiated through use (strength > default),
+        a re-run of compute_hallways_for_wing on the same drawer set must
+        NOT reset that strength. Otherwise every mine wipes the connection
+        weights — undermining the whole L7 dynamics layer."""
+        _use_tmp_hallway_file(monkeypatch, tmp_path)
+        col = _fake_collection(
+            [
+                {"wing": "wing_aya", "room": "diary", "entities": "Aya;Lumi"},
+                {"wing": "wing_aya", "room": "letters", "entities": "Aya;Lumi"},
+            ]
+        )
+        first_pass = hallways_mod.compute_hallways_for_wing("wing_aya", col=col, min_count=2)
+        assert first_pass, "first pass must create at least one hallway"
+
+        # Simulate user activity: manually bump strength + access_count on
+        # the persisted records.
+        stored = hallways_mod._load_hallways()
+        for h in stored:
+            h["strength"] = 2.5
+            h["access_count"] = 7
+            h["stability"] = 1.8
+        hallways_mod._save_hallways(stored)
+
+        # Recompute the same wing — should preserve the bumped values.
+        hallways_mod.compute_hallways_for_wing("wing_aya", col=col, min_count=2)
+
+        after = hallways_mod._load_hallways()
+        assert after, "after-recompute records must exist"
+        for h in after:
+            assert h["strength"] == 2.5, (
+                f"recompute reset strength — L7 dynamics undermined; got {h}"
+            )
+            assert h["access_count"] == 7, f"recompute reset access_count; got {h}"
+            assert h["stability"] == 1.8, f"recompute reset stability; got {h}"
+
+    def test_recompute_initializes_dynamics_for_brand_new_pairs(self, tmp_path, monkeypatch):
+        """When a recompute discovers a NEW entity pair (not in the prior
+        wing's hallways), the new record gets default dynamics — not
+        inherited from some unrelated previous record."""
+        from mempalace.dynamics import DEFAULT_STRENGTH
+
+        _use_tmp_hallway_file(monkeypatch, tmp_path)
+        col_a = _fake_collection(
+            [
+                {"wing": "wing_aya", "room": "diary", "entities": "Aya;Lumi"},
+                {"wing": "wing_aya", "room": "letters", "entities": "Aya;Lumi"},
+            ]
+        )
+        hallways_mod.compute_hallways_for_wing("wing_aya", col=col_a, min_count=2)
+
+        # Bump strength on the Aya↔Lumi pair to verify it's not leaked.
+        stored = hallways_mod._load_hallways()
+        for h in stored:
+            h["strength"] = 3.5
+        hallways_mod._save_hallways(stored)
+
+        # Now a recompute with a different entity pair (Ever shows up).
+        col_b = _fake_collection(
+            [
+                {"wing": "wing_aya", "room": "diary", "entities": "Aya;Lumi"},
+                {"wing": "wing_aya", "room": "letters", "entities": "Aya;Lumi"},
+                {"wing": "wing_aya", "room": "diary", "entities": "Aya;Ever"},
+                {"wing": "wing_aya", "room": "letters", "entities": "Aya;Ever"},
+            ]
+        )
+        hallways_mod.compute_hallways_for_wing("wing_aya", col=col_b, min_count=2)
+
+        after = hallways_mod._load_hallways()
+        aya_ever = [h for h in after if {h["entity_a"], h["entity_b"]} == {"Aya", "Ever"}]
+        aya_lumi = [h for h in after if {h["entity_a"], h["entity_b"]} == {"Aya", "Lumi"}]
+
+        assert len(aya_ever) == 1, "Aya↔Ever pair should now exist"
+        assert aya_ever[0]["strength"] == DEFAULT_STRENGTH, (
+            "new pair should get default strength, not inherit from another pair"
+        )
+        assert len(aya_lumi) == 1
+        assert aya_lumi[0]["strength"] == 3.5, (
+            "existing pair's accumulated strength must still be preserved"
+        )

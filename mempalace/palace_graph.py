@@ -30,6 +30,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from .config import MempalaceConfig, normalize_wing_name
+from .dynamics import initialize_dynamics_fields
 from .palace import get_collection as _get_palace_collection
 from .palace import mine_lock
 
@@ -500,10 +501,22 @@ def create_tunnel(
                 # Preserve original creation timestamp on label updates.
                 tunnel["created_at"] = existing.get("created_at", tunnel["created_at"])
                 tunnel["updated_at"] = datetime.now(timezone.utc).isoformat()
+                # Preserve L7 dynamics fields across re-creation events.
+                # Without this, a label update (or any re-create) would
+                # reset the connection's strength / stability / access_count
+                # — defeating the living-connection layer. Backfill any
+                # still-missing fields so legacy records also pick up
+                # defaults on next touch.
+                for field in ("strength", "stability", "last_activated", "access_count"):
+                    if field in existing:
+                        tunnel[field] = existing[field]
+                initialize_dynamics_fields(tunnel)
                 existing.clear()
                 existing.update(tunnel)
                 _save_tunnels(tunnels)
                 return existing
+        # Brand-new tunnel — initialize dynamics from defaults.
+        initialize_dynamics_fields(tunnel)
         tunnels.append(tunnel)
         _save_tunnels(tunnels)
     return tunnel
