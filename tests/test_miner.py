@@ -1864,3 +1864,115 @@ class TestExtractContentDate:
 
         result = _extract_content_date("/nonexistent/untitled.md", "")
         assert result is None
+
+    # ── Negative cases — verbatim from Igor's PR #1584 review ──────────────
+    # Per Igor (2026-05-22 11:18 UTC): dateutil.parser.parse(fuzzy=True)
+    # hallucinates dates on benign inputs. These tests pin the fix: junk
+    # filenames and digit-bearing-but-not-date content must NOT yield a
+    # fabricated date. Each input here returned a confident wrong date
+    # before the fix; each must return None after.
+
+    def test_no_hallucination_junk_filename_with_trailing_digit(self):
+        """Filename like 'tmp_random_file_5' returned '2026-05-05' before fix."""
+        from mempalace.miner import _extract_content_date
+
+        # /nonexistent ensures mtime fallback returns None (so any non-None
+        # result would be a hallucinated date, not a real mtime).
+        result = _extract_content_date("/nonexistent/tmp_random_file_5.md", "")
+        assert result is None, f"junk filename hallucinated date {result!r}"
+
+    def test_no_hallucination_untitled_with_index(self):
+        """Filename like 'untitled-1' returned '2026-05-01' before fix."""
+        from mempalace.miner import _extract_content_date
+
+        result = _extract_content_date("/nonexistent/untitled-1.md", "")
+        assert result is None, f"untitled-N hallucinated date {result!r}"
+
+    def test_no_hallucination_filename_year_only(self):
+        """Filename like 'notes.2024.md' returned '2024-05-22' before fix
+        (year extracted, month+day fabricated from today).
+        """
+        from mempalace.miner import _extract_content_date
+
+        result = _extract_content_date("/nonexistent/notes.2024.md", "")
+        assert result is None, (
+            f"year-only filename hallucinated date {result!r}; "
+            "year + month-name OR year-month-day required"
+        )
+
+    def test_no_hallucination_filename_year_and_month_only(self):
+        """Filename like '2024-06.md' returned '2024-06-22' before fix
+        (year+month extracted, day fabricated from today).
+
+        A filename must carry a complete year+month+day OR a recognizable
+        month-name token to be accepted as a content date — partial
+        year-month with day padded from today is hallucination.
+        """
+        from mempalace.miner import _extract_content_date
+
+        result = _extract_content_date("/nonexistent/2024-06.md", "")
+        assert result is None, f"year-month-only filename hallucinated date {result!r}"
+
+    def test_no_hallucination_content_with_issue_number(self):
+        """Content 'Bug fix for issue 42 in module 7' returned '2042-07-22'
+        before fix.
+        """
+        from mempalace.miner import _extract_content_date
+
+        content = "Bug fix for issue 42 in module 7\n\nMore body text here.\n"
+        result = _extract_content_date("/nonexistent/issue.md", content)
+        assert result is None, f"issue-number content hallucinated date {result!r}"
+
+    def test_no_hallucination_content_with_count(self):
+        """Content 'Tested with 1000 drawers' returned '1000-05-22' before fix
+        (year 1000 AD!).
+        """
+        from mempalace.miner import _extract_content_date
+
+        content = "Tested with 1000 drawers in this configuration.\n"
+        result = _extract_content_date("/nonexistent/test.md", content)
+        assert result is None, f"count-in-content hallucinated date {result!r}"
+
+    def test_no_hallucination_content_with_version_number(self):
+        """Content 'Version 3.3.6 released' returned '2006-03-03' before fix."""
+        from mempalace.miner import _extract_content_date
+
+        content = "Version 3.3.6 released today with new features.\n"
+        result = _extract_content_date("/nonexistent/release.md", content)
+        assert result is None, f"version-number content hallucinated date {result!r}"
+
+    # ── Two-digit year boundary (per Igor smaller-item #4) ─────────────────
+    # The stdlib convention is 70-99 → 19xx, 00-69 → 20xx. Pin the boundary.
+
+    def test_two_digit_year_69_is_2069(self, tmp_path):
+        from mempalace.miner import _extract_content_date
+
+        f = tmp_path / "untitled.md"
+        # 25/03/69 — day > 12 forces DD/MM, then 69 → 2069
+        content = "Plan from 25/03/69 timeline.\n"
+        f.write_text(content)
+        assert _extract_content_date(str(f), content) == "2069-03-25"
+
+    def test_two_digit_year_70_is_1970(self, tmp_path):
+        from mempalace.miner import _extract_content_date
+
+        f = tmp_path / "untitled.md"
+        content = "Note from 25/03/70.\n"
+        f.write_text(content)
+        assert _extract_content_date(str(f), content) == "1970-03-25"
+
+    def test_two_digit_year_99_is_1999(self, tmp_path):
+        from mempalace.miner import _extract_content_date
+
+        f = tmp_path / "untitled.md"
+        content = "Reference from 25/12/99 archives.\n"
+        f.write_text(content)
+        assert _extract_content_date(str(f), content) == "1999-12-25"
+
+    def test_two_digit_year_00_is_2000(self, tmp_path):
+        from mempalace.miner import _extract_content_date
+
+        f = tmp_path / "untitled.md"
+        content = "Y2K reference: 25/01/00.\n"
+        f.write_text(content)
+        assert _extract_content_date(str(f), content) == "2000-01-25"

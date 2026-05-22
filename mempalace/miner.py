@@ -912,6 +912,42 @@ _ORDINAL_SUFFIX_RE = re.compile(r"\b(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
 _ISO_DATE_RE = re.compile(r"\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b")
 _SLASH_DATE_RE = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b")
 
+# Gate for dateutil fallback. A candidate string must match ONE of these
+# patterns to be considered a real date — otherwise dateutil's fuzzy mode
+# would hallucinate dates from any digit-bearing text (Igor's reproductions
+# on PR #1584: "tmp_random_file_5" → 2026-05-05, "Version 3.3.6" → 2006-03-03,
+# "Tested with 1000 drawers" → 1000-05-22, etc.). The fuzzy=True flag is
+# never set — dateutil only runs in strict mode on a substring we've
+# already validated.
+#
+# Three accepted shapes (all require a 4-digit year explicitly):
+#   1. Numeric: 4-digit year + separator + 1-2 digit month + separator + 1-2 digit day
+#      ("2024-11-08", "2024 11 08", "2024/06/15", "2024.11.08")
+#   2. Month-name + day + year: "November 8 2024", "Nov 8 2024", "Apr 6 2011"
+#   3. Day + month-name + year: "8 November 2024", "8 Nov 2024", "6 April 2011"
+#
+# Partial dates ("2024-06", "notes.2024", "Nov 8", "April 6") are
+# DELIBERATELY rejected — without all three components we'd fall back to
+# padding from today's date, which is hallucination, not extraction.
+_MONTH_NAME = (
+    r"(?:january|february|march|april|may|june|july|august|"
+    r"september|october|november|december|"
+    r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)"
+)
+_VALID_DATE_RE = re.compile(
+    r"(?:"
+    # Shape 1: YYYY sep MM sep DD (sep = - / . or whitespace)
+    r"\b\d{4}[-/.\s]+\d{1,2}[-/.\s]+\d{1,2}\b"
+    r"|"
+    # Shape 2: month-name + day + year
+    r"\b" + _MONTH_NAME + r"\.?[-\s]+\d{1,2}(?:st|nd|rd|th)?[,\s-]+\d{4}\b"
+    r"|"
+    # Shape 3: day + month-name + year
+    r"\b\d{1,2}(?:st|nd|rd|th)?[-\s]+" + _MONTH_NAME + r"\.?[,\s-]+\d{4}\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _try_iso_match(text: str) -> Optional[str]:
     """Try to extract YYYY-MM-DD from text via the ISO regex. Returns ISO string or None."""
@@ -927,7 +963,15 @@ def _try_iso_match(text: str) -> Optional[str]:
 
 
 def _try_filename_date(source_file: str) -> Optional[str]:
-    """Extract date from filename stem. ISO regex first, then dateutil fuzzy."""
+    """Extract date from filename stem.
+
+    ISO regex first (catches the canonical ``2024-11-08*`` diary pattern).
+    Then a strict regex gate (``_VALID_DATE_RE``) screens for complete
+    natural-language dates before invoking dateutil. ``fuzzy=True`` is
+    NOT used — it hallucinates dates on any digit-bearing input. Junk
+    filenames like ``tmp_random_file_5`` or ``notes.2024`` return None
+    so the caller falls through to frontmatter / content / mtime.
+    """
     try:
         stem = Path(source_file).stem
     except (TypeError, ValueError):
@@ -943,10 +987,18 @@ def _try_filename_date(source_file: str) -> Optional[str]:
     # Natural language: "April-6th-2011-notes", "Nov-8-2024", etc.
     # Preprocess: strip ordinals, dashes/underscores → spaces.
     normalized = _ORDINAL_SUFFIX_RE.sub(r"\1", stem).replace("-", " ").replace("_", " ")
+
+    # Gate: require a complete date pattern. Without this, dateutil would
+    # accept any digit-bearing junk and fabricate a date.
+    m = _VALID_DATE_RE.search(normalized)
+    if not m:
+        return None
+
     try:
         from dateutil import parser as dateutil_parser
 
-        dt = dateutil_parser.parse(normalized, fuzzy=True)
+        # Parse the matched substring only, no fuzzy mode.
+        dt = dateutil_parser.parse(m.group(0))
         return dt.strftime("%Y-%m-%d")
     except (ValueError, OverflowError, ImportError):
         return None
@@ -1064,11 +1116,17 @@ def _try_content_body_date(content: str) -> Optional[str]:
         except (ValueError, TypeError):
             pass  # Fall through to dateutil fuzzy.
 
-    # 3. dateutil fuzzy — natural-language fallback ("November 8, 2024" etc.).
+    # 3. dateutil natural-language fallback. Strict regex gate first
+    # (no fuzzy=True) — without it, dateutil hallucinates dates from any
+    # digit-bearing text. The gate requires a complete year+month+day
+    # pattern OR a month-name + day + year combination.
+    m = _VALID_DATE_RE.search(head)
+    if not m:
+        return None
     try:
         from dateutil import parser as dateutil_parser
 
-        dt = dateutil_parser.parse(head, fuzzy=True)
+        dt = dateutil_parser.parse(m.group(0))
         return dt.strftime("%Y-%m-%d")
     except (ValueError, OverflowError, ImportError):
         return None
@@ -1300,6 +1358,12 @@ def process_file(
         file_content_date = _extract_content_date(source_file, content)
 
         drawers_added = 0
+        # Accumulate drawer metadata across batches so the closet emitter
+        # below can consume it (Tier 6a date+line locators). Without this,
+        # the new ``drawer_metas`` kwarg never reaches ``build_closet_lines``
+        # in production and the 4-segment pointer form lives only in tests.
+        # Per PR #1584 review (Igor, 2026-05-22).
+        all_metas: list = []
         for batch_start in range(0, len(chunks), DRAWER_UPSERT_BATCH_SIZE):
             batch_docs: list = []
             batch_ids: list = []
@@ -1328,6 +1392,7 @@ def process_file(
                 metadatas=batch_metas,
             )
             drawers_added += len(batch_docs)
+            all_metas.extend(batch_metas)
 
         # Build closet — the searchable index pointing to these drawers.
         # Purge first: a re-mine (mtime change or normalize_version bump) must
@@ -1337,7 +1402,18 @@ def process_file(
                 f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(c['chunk_index'])).encode()).hexdigest()[:24]}"
                 for c in chunks
             ]
-            closet_lines = build_closet_lines(source_file, drawer_ids, content, wing, room)
+            # Pass drawer_metas so build_closet_lines can emit the Tier 6a
+            # 4-segment pointer (``topic|entities|YYYY-MM-DD:Lstart-Lend|→ids``)
+            # when line_start / line_end / content_date are present. Falls
+            # back to the legacy 3-segment form automatically when not.
+            closet_lines = build_closet_lines(
+                source_file,
+                drawer_ids,
+                content,
+                wing,
+                room,
+                drawer_metas=all_metas,
+            )
             closet_id_base = (
                 f"closet_{wing}_{room}_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
             )

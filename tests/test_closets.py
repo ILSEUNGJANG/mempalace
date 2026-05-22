@@ -453,6 +453,55 @@ class TestMinerClosetRebuild:
                 f"orphan closet {stale_id} from larger first run survived purge"
             )
 
+    def test_production_miner_emits_4_segment_pointers_with_content_date(self, tmp_path):
+        """Regression for PR #1584 Igor review Issue #1.
+
+        Before the wiring fix, ``build_closet_lines`` learned the
+        ``drawer_metas`` kwarg but no production caller passed it — so the
+        Tier 6a 4-segment pointer (``topic|entities|YYYY-MM-DD:Lstart-Lend|
+        →drawers``) was emitted by tests only, not by real mines. This
+        test pins the end-to-end wiring: a real ``mine()`` of a file with
+        a recognizable date in its filename must produce closet documents
+        containing the 4-segment pointer with that filename-derived date.
+        """
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / "mempalace.yaml").write_text(
+            yaml.dump({"wing": "proj", "rooms": [{"name": "general", "description": "x"}]})
+        )
+        # Filename carries an unambiguous content date.
+        target = project / "2024-11-08-conversation.md"
+        target.write_text(
+            "# Brands of dog food\n\n"
+            "We talked about which brands work best for Osian's dog.\n"
+            "Decided to try a few organic options this month.\n" + ("Filler line.\n" * 20)
+        )
+
+        palace = tmp_path / "palace"
+        mine(str(project), str(palace), wing_override="proj", agent="test")
+
+        col = get_closets_collection(str(palace))
+        result = col.get(where={"source_file": str(target)})
+        assert result["ids"], "production mine must write closets"
+
+        # At least one closet document must contain the 4-segment Tier 6a
+        # pointer for the date this file is from (2024-11-08).
+        joined = "\n".join(result["documents"] or [])
+        assert "2024-11-08:L" in joined, (
+            f"production miner did not emit Tier 6a 4-segment pointer; closet documents: {joined!r}"
+        )
+        # Each non-empty pointer line carrying a date locator must have 4
+        # pipe-separated segments — proving build_closet_lines was called
+        # with drawer_metas (regression for Issue #1).
+        for doc in result["documents"] or []:
+            for line in (doc or "").splitlines():
+                if "2024-11-08:L" in line and "→" in line:
+                    parts = line.split("|")
+                    assert len(parts) == 4, (
+                        f"closet line with date locator must be 4 segments, "
+                        f"got {len(parts)}: {line!r}"
+                    )
+
 
 # ── _extract_drawer_ids_from_closet ───────────────────────────────────
 
