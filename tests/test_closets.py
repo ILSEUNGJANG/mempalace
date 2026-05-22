@@ -141,9 +141,9 @@ class TestMineLock:
         # Sort by entry time and verify the second entry is after the first exit.
         intervals.sort(key=lambda iv: iv[1])
         (_, enter_a, exit_a), (_, enter_b, exit_b) = intervals
-        assert (
-            enter_a < exit_a <= enter_b < exit_b
-        ), f"critical sections overlapped — lock failed to serialize: {intervals}"
+        assert enter_a < exit_a <= enter_b < exit_b, (
+            f"critical sections overlapped — lock failed to serialize: {intervals}"
+        )
 
 
 # ── build_closet_lines ─────────────────────────────────────────────────
@@ -261,9 +261,9 @@ class TestBuildClosetLines:
             parts = line.split("|")
             assert len(parts) == 4, f"expected 4 segments, got {line!r}"
             date_line_seg = parts[2]
-            assert (
-                date_line_seg == "2026-05-21:L42-L78"
-            ), f"date+line segment wrong: {date_line_seg!r}"
+            assert date_line_seg == "2026-05-21:L42-L78", (
+                f"date+line segment wrong: {date_line_seg!r}"
+            )
             assert parts[3].startswith("→")
 
     def test_falls_back_to_3_segment_format_when_metas_missing(self):
@@ -292,9 +292,9 @@ class TestBuildClosetLines:
         ]
         lines = build_closet_lines("/x.md", ["d1"], content, "w", "r", drawer_metas=metas)
         for line in lines:
-            assert (
-                len(line.split("|")) == 3
-            ), f"meta without line keys should fall back to 3-seg; got {line!r}"
+            assert len(line.split("|")) == 3, (
+                f"meta without line keys should fall back to 3-seg; got {line!r}"
+            )
 
     def test_date_segment_uses_filed_at_date_portion_only(self):
         """The date portion is the YYYY-MM-DD prefix of filed_at, not the
@@ -342,9 +342,9 @@ class TestBuildClosetLines:
         for line in lines:
             parts = line.split("|")
             assert len(parts) == 4, f"expected 4 segments: {line!r}"
-            assert (
-                parts[2] == "2024-11-08:L42-L78"
-            ), f"closet date segment did not prefer content_date: {parts[2]!r}"
+            assert parts[2] == "2024-11-08:L42-L78", (
+                f"closet date segment did not prefer content_date: {parts[2]!r}"
+            )
 
 
 # ── upsert_closet_lines ───────────────────────────────────────────────
@@ -443,15 +443,15 @@ class TestMinerClosetRebuild:
         second_docs = "\n".join(second_pass["documents"]).lower()
         assert "only topic now" in second_docs
         for i in range(15):
-            assert (
-                f"topic {i}\n" not in second_docs
-            ), f"stale 'Topic {i}' from first mine survived the rebuild"
+            assert f"topic {i}\n" not in second_docs, (
+                f"stale 'Topic {i}' from first mine survived the rebuild"
+            )
         # Numbered closets that existed only in the larger first run must be gone.
         leftover = first_ids - set(second_pass["ids"])
         for stale_id in leftover:
-            assert not col.get(ids=[stale_id])[
-                "ids"
-            ], f"orphan closet {stale_id} from larger first run survived purge"
+            assert not col.get(ids=[stale_id])["ids"], (
+                f"orphan closet {stale_id} from larger first run survived purge"
+            )
 
 
 # ── _extract_drawer_ids_from_closet ───────────────────────────────────
@@ -830,9 +830,9 @@ class TestDiaryIngest:
 
         # No state file inside the user's diary dir.
         for entry in diary_dir.iterdir():
-            assert (
-                "diary_ingest" not in entry.name
-            ), f"state file leaked into user diary dir: {entry}"
+            assert "diary_ingest" not in entry.name, (
+                f"state file leaked into user diary dir: {entry}"
+            )
 
         # State file does exist under ~/.mempalace/state/.
         state_path = _state_file_for(str(palace_dir), diary_dir.resolve())
@@ -930,13 +930,13 @@ class TestDiaryIngest:
         docs = drawers["documents"]
 
         max_len = max(len(d) for d in docs)
-        assert (
-            max_len <= 800
-        ), f"no drawer document may exceed CHUNK_SIZE=800; got max_len={max_len}"
+        assert max_len <= 800, (
+            f"no drawer document may exceed CHUNK_SIZE=800; got max_len={max_len}"
+        )
         # 3 entries with the middle entry split into >= 2 chunks → >= 4 drawers
-        assert (
-            len(docs) >= 4
-        ), f"oversized middle entry must produce multiple drawers; got {len(docs)} total drawers"
+        assert len(docs) >= 4, (
+            f"oversized middle entry must produce multiple drawers; got {len(docs)} total drawers"
+        )
 
     def test_incremental_appends_new_entry_only(self, tmp_path):
         """Regression for #1539: incremental ingest must add exactly the
@@ -985,9 +985,9 @@ class TestDiaryIngest:
 
         state = json.loads(_state_file_for(str(palace_dir), diary_dir.resolve()).read_text())
         key = "diary|2026-04-13.md"
-        assert (
-            state[key]["entry_count"] == 3
-        ), f"watermark must equal entry count; got {state[key]['entry_count']}"
+        assert state[key]["entry_count"] == 3, (
+            f"watermark must equal entry count; got {state[key]['entry_count']}"
+        )
 
         text = (diary_dir / "2026-04-13.md").read_text()
         assert len(_split_entries(text)) == state[key]["entry_count"]
@@ -1020,9 +1020,9 @@ class TestDiaryIngest:
 
         indices = sorted(m["chunk_index"] for m in all_drawers["metadatas"])
         # Global counter: 0, 1, 2, ... contiguous across all entries.
-        assert indices == list(
-            range(len(indices))
-        ), f"chunk_index must be contiguous 0..N-1 globally; got {indices}"
+        assert indices == list(range(len(indices))), (
+            f"chunk_index must be contiguous 0..N-1 globally; got {indices}"
+        )
         # All chunks have the same source_file (filter target for neighbor
         # expansion). Verify the searcher-required pair (source_file +
         # chunk_index) is consistent on every drawer.
@@ -1081,9 +1081,9 @@ class TestDiaryIngest:
 
         ingest_diaries(str(diary_dir), str(palace_dir), force=True)
         col = get_collection(str(palace_dir))
-        assert (
-            col.count() == 2
-        ), f"expected 2 drawers (one per header-only entry); got {col.count()}"
+        assert col.count() == 2, (
+            f"expected 2 drawers (one per header-only entry); got {col.count()}"
+        )
         docs = col.get()["documents"]
         # Each drawer holds the header line itself.
         joined = "\n".join(docs)
@@ -1154,9 +1154,9 @@ class TestDiaryIngest:
         # confirm nothing landed for this source file.
         real_col = real_get_collection(str(palace_dir))
         rows = real_col.get(where={"source_file": str(diary_dir / "2026-05-18.md")})
-        assert (
-            rows["ids"] == []
-        ), f"failed batched upsert must leave no partial drawers; got {rows['ids']}"
+        assert rows["ids"] == [], (
+            f"failed batched upsert must leave no partial drawers; got {rows['ids']}"
+        )
 
 
 # ── cross-wing tunnels ───────────────────────────────────────────────
@@ -1322,9 +1322,9 @@ class TestTunnels:
 
         assert not errors, f"worker raised: {errors}"
         tunnels = list_tunnels()
-        assert (
-            len(tunnels) == 5
-        ), f"expected 5 concurrent tunnels, got {len(tunnels)} — write race dropped some"
+        assert len(tunnels) == 5, (
+            f"expected 5 concurrent tunnels, got {len(tunnels)} — write race dropped some"
+        )
 
     def test_created_at_is_timezone_aware(self):
         """Regression: created_at must be tz-aware UTC, not naive."""

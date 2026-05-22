@@ -99,14 +99,14 @@ def test_mine_computes_hallways_for_wing_post_mine(monkeypatch):
         # Must have been called exactly once, with our wing name + a live
         # collection. We don't pin min_count — the integration may pick a
         # default that differs from the function's own default.
-        assert (
-            len(hallway_calls) == 1
-        ), f"expected compute_hallways_for_wing to be called once, got {len(hallway_calls)}"
+        assert len(hallway_calls) == 1, (
+            f"expected compute_hallways_for_wing to be called once, got {len(hallway_calls)}"
+        )
         call = hallway_calls[0]
         assert call["wing"] == "test_project"
-        assert (
-            call["col"] is not None
-        ), "must pass the live collection so hallways can query drawers"
+        assert call["col"] is not None, (
+            "must pass the live collection so hallways can query drawers"
+        )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -553,12 +553,12 @@ def test_entity_metadata_matches_known_names_case_insensitively(monkeypatch):
     # Lowercase mentions of seeded names must still be tagged.
     result = miner._extract_entities_for_metadata("aya talked to lumi today about the palace.")
     matched = set(result.split(";")) if result else set()
-    assert (
-        "Aya" in matched
-    ), f"lowercase 'aya' must match the seeded 'Aya' (case-insensitive). Got: {matched!r}"
-    assert (
-        "Lumi" in matched
-    ), f"lowercase 'lumi' must match the seeded 'Lumi' (case-insensitive). Got: {matched!r}"
+    assert "Aya" in matched, (
+        f"lowercase 'aya' must match the seeded 'Aya' (case-insensitive). Got: {matched!r}"
+    )
+    assert "Lumi" in matched, (
+        f"lowercase 'lumi' must match the seeded 'Lumi' (case-insensitive). Got: {matched!r}"
+    )
 
     # Mixed case must also match
     result_mixed = miner._extract_entities_for_metadata("Aya saw lumi. AYA waved.")
@@ -1661,9 +1661,9 @@ class TestChunkTextLineRanges:
         content = "\n".join(f"line {i}" for i in range(1, total_lines + 1))
         chunks = chunk_text(content, "/x.md", chunk_size=500, chunk_overlap=50)
         # Last chunk's line_end must reach the final line of the source.
-        assert (
-            chunks[-1]["line_end"] >= total_lines
-        ), f"last chunk ends at L{chunks[-1]['line_end']}, expected >= L{total_lines}"
+        assert chunks[-1]["line_end"] >= total_lines, (
+            f"last chunk ends at L{chunks[-1]['line_end']}, expected >= L{total_lines}"
+        )
 
     def test_single_chunk_spans_all_lines_for_small_input(self):
         from mempalace.miner import chunk_text
@@ -1761,12 +1761,7 @@ class TestExtractContentDate:
 
         f = tmp_path / "untitled.md"
         content = (
-            "---\n"
-            "title: Some Notes\n"
-            "date: 2024-11-08\n"
-            "tags: [diary]\n"
-            "---\n\n"
-            "Body content here.\n"
+            "---\ntitle: Some Notes\ndate: 2024-11-08\ntags: [diary]\n---\n\nBody content here.\n"
         )
         f.write_text(content)
         assert _extract_content_date(str(f), content) == "2024-11-08"
@@ -1783,7 +1778,7 @@ class TestExtractContentDate:
         from mempalace.miner import _extract_content_date
 
         f = tmp_path / "transcript.md"
-        content = "Session resumed from compact on 2024-11-08\n" "User: hey lumi\n" "Lumi: hi aya\n"
+        content = "Session resumed from compact on 2024-11-08\nUser: hey lumi\nLumi: hi aya\n"
         f.write_text(content)
         assert _extract_content_date(str(f), content) == "2024-11-08"
 
@@ -1810,7 +1805,7 @@ class TestExtractContentDate:
         f = tmp_path / "untitled.md"
         # 25/03/21 cannot be MM/DD (no month 25) → file locale must be DD/MM
         # Therefore 04/11/22 → 4 November 2022 → "2022-11-04"
-        content = "Started writing on 04/11/22.\n" "Earlier notes from 25/03/21 referenced.\n"
+        content = "Started writing on 04/11/22.\nEarlier notes from 25/03/21 referenced.\n"
         f.write_text(content)
         assert _extract_content_date(str(f), content) == "2022-11-04"
 
@@ -1837,8 +1832,7 @@ class TestExtractContentDate:
 
         f = tmp_path / "untitled.md"
         content = (
-            "---\ndate: 2020-01-01\n---\n\n"
-            "Body talks about 2024-11-08 but frontmatter is older.\n"
+            "---\ndate: 2020-01-01\n---\n\nBody talks about 2024-11-08 but frontmatter is older.\n"
         )
         f.write_text(content)
         assert _extract_content_date(str(f), content) == "2020-01-01"
