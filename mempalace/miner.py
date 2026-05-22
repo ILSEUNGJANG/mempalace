@@ -540,8 +540,13 @@ def chunk_text(
             # Tier 6a — 1-indexed line range in the stripped source.
             # Approximate locator (±1 at boundaries is fine for "jump to
             # roughly here"); exact-quote positioning is a future tier.
-            line_start = content[:start].count("\n") + 1
-            line_end = content[:end].count("\n") + 1
+            # Use the bounds form of ``str.count`` (counts on the original
+            # string with start/end limits) instead of slicing — slicing
+            # would allocate a new substring per chunk and produce O(N^2)
+            # work on a 500MB file with 50K chunks. Per PR #1579 review
+            # (gemini-code-assist, medium priority).
+            line_start = content.count("\n", 0, start) + 1
+            line_end = content.count("\n", 0, end) + 1
             chunks.append(
                 {
                     "content": chunk,
@@ -951,32 +956,33 @@ def _try_filename_date(source_file: str) -> Optional[str]:
 
 
 def _try_frontmatter_date(content: str) -> Optional[str]:
-    """Extract date from YAML frontmatter date / created / published field."""
+    """Extract date from YAML frontmatter date / created / published field.
+
+    Uses ``str.find`` to locate the closing ``\\n---`` delimiter and slices
+    the frontmatter directly. The earlier implementation split the entire
+    file into lines just to scan the first handful — wasteful on large
+    files. Per PR #1579 review (gemini-code-assist, medium priority).
+    """
     if not content:
         return None
     stripped = content.lstrip()
     if not stripped.startswith("---"):
         return None
 
-    lines = stripped.split("\n")
-    if not lines or lines[0].strip() != "---":
+    # Locate the closing "\n---" without materializing a line-list.
+    end_pos = stripped.find("\n---", 3)
+    if end_pos == -1:
         return None
 
-    # Find closing ---
-    end_idx = None
-    for i, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
-            end_idx = i
-            break
-    if end_idx is None:
+    frontmatter_text = stripped[3:end_pos].strip()
+    if not frontmatter_text:
         return None
 
-    frontmatter_text = "\n".join(lines[1:end_idx])
     try:
         import yaml
 
         data = yaml.safe_load(frontmatter_text)
-    except (ImportError, Exception):
+    except Exception:
         return None
 
     if not isinstance(data, dict):
@@ -1009,20 +1015,27 @@ def _try_content_body_date(content: str) -> Optional[str]:
       1. ISO regex (highest signal)
       2. Slash dates with locale auto-disambiguation (DD/MM vs MM/DD)
       3. dateutil fuzzy for natural-language ("November 8, 2024" etc.)
+
+    Uses ``str.find`` to skip frontmatter and bounded ``str.split(..., 10)``
+    to bound the head extraction — never materializes a full line-list on a
+    large file. Per PR #1579 review (gemini-code-assist, medium priority).
     """
     if not content:
         return None
 
-    # Skip frontmatter if present.
     stripped = content.lstrip()
-    if stripped.startswith("---"):
-        lines = stripped.split("\n")
-        for i, line in enumerate(lines[1:], start=1):
-            if line.strip() == "---":
-                stripped = "\n".join(lines[i + 1 :])
-                break
 
-    head = "\n".join(stripped.split("\n")[:10])
+    # Skip frontmatter if present, using ``find`` instead of full split.
+    if stripped.startswith("---"):
+        end_fm = stripped.find("\n---", 3)
+        if end_fm != -1:
+            eol = stripped.find("\n", end_fm + 1)
+            if eol != -1:
+                stripped = stripped[eol + 1 :]
+
+    # Bounded split — maxsplit=10 caps the work to 10 newline scans rather
+    # than splitting the entire file just to look at the first 10 lines.
+    head = "\n".join(stripped.split("\n", 10)[:10])
     if not head:
         return None
 
