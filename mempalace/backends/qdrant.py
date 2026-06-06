@@ -1081,6 +1081,7 @@ class QdrantBackend(BaseBackend):
             "supports_embeddings_out",
             "supports_metadata_filters",
             "supports_lexical_search",
+            "supports_namespace_isolation",
             "server_mode",
         }
     )
@@ -1221,6 +1222,18 @@ class QdrantBackend(BaseBackend):
                 self._validate_marker_target(palace, config)
             elif not create:
                 raise PalaceNotFoundError(marker_path)
+        else:
+            # The qdrant marker is this backend's only mismatch-protection
+            # anchor, and it lives next to the palace on local disk. With no
+            # local_path (the pure-remote / hosted mode) we can neither write
+            # nor validate it, so opening would silently drop protection
+            # against URL/namespace drift. Refuse loudly instead. A remote
+            # marker store for pure-remote palaces is tracked as a follow-up.
+            raise BackendError(
+                "qdrant backend requires a local palace path to anchor mismatch "
+                "protection; pure-remote palaces (local_path=None) are not "
+                "supported yet"
+            )
         remote_collection = self._remote_collection_name(
             palace=palace,
             collection_name=collection_name,
