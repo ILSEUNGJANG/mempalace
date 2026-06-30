@@ -6,6 +6,7 @@ import logging
 import os
 import pickle
 import sqlite3
+import struct
 from numbers import Integral
 from pathlib import Path
 from typing import Any, Optional
@@ -75,6 +76,55 @@ def _hnsw_payload_appears_sane(seg_dir: str) -> bool:
 
     ratio = _hnsw_link_to_data_ratio(seg_dir)
     return ratio is None or ratio <= _HNSW_LINK_TO_DATA_MAX_RATIO
+
+
+# chromadb 1.5.x writes the hnswlib scalar header to header.bin (100 bytes) as
+# fixed-width slots; cur_element_count is the little-endian uint32 at offset 20
+# and size_data_per_element at offset 28 (empirically stable across the live
+# palace; cross-checked against data_level0.bin below).
+_HNSW_HEADER_CUR_COUNT_OFFSET = 20
+_HNSW_HEADER_ELEM_SIZE_OFFSET = 28
+
+
+def _hnsw_cur_element_count(seg_dir: str) -> Optional[int]:
+    """Return the segment's flushed element count from header.bin, or None.
+
+    ``cur_element_count`` is the number of vectors actually written to the
+    on-disk HNSW index — 0 for a freshly-created, never-flushed segment. This
+    distinguishes a healthy *empty stub* (chromadb allocates ``data_level0.bin``
+    the moment a collection is created; a collection that never crosses
+    ``hnsw:sync_threshold`` keeps every row in the WAL and writes no metadata
+    pickle, leaving an empty index) from a genuine *partial flush* (vectors
+    written, process killed before the metadata pickle).
+
+    Defensive: returns ``None`` on any read error, an unexpected header size, an
+    implausible element stride, or a count ``data_level0.bin`` is too small to
+    hold — so a future chromadb header-format change degrades to the
+    conservative pre-existing behaviour, never to under-protection.
+    """
+    header_path = os.path.join(seg_dir, "header.bin")
+    data_path = os.path.join(seg_dir, "data_level0.bin")
+    try:
+        # chromadb's current header.bin is exactly 100 bytes; any other size is
+        # not the layout this parser was validated against.
+        if os.path.getsize(header_path) != 100:
+            return None
+        with open(header_path, "rb") as f:
+            hb = f.read(64)
+        if len(hb) < _HNSW_HEADER_ELEM_SIZE_OFFSET + 4:
+            return None
+        cur = struct.unpack_from("<I", hb, _HNSW_HEADER_CUR_COUNT_OFFSET)[0]
+        elem = struct.unpack_from("<I", hb, _HNSW_HEADER_ELEM_SIZE_OFFSET)[0]
+        # Element stride must be sane (a 384-dim float32 index is 1676 bytes;
+        # guard a wide but finite range) and data_level0.bin must be able to
+        # hold `cur` elements — otherwise we are mis-reading the header.
+        if not (8 <= elem <= 10_000_000):
+            return None
+        if os.path.getsize(data_path) < cur * elem:
+            return None
+        return cur
+    except (OSError, struct.error):
+        return None
 
 
 # HNSW tuning to prevent link_lists.bin bloat on large mines (#344).
@@ -169,11 +219,21 @@ def _segment_appears_healthy(seg_dir: str) -> bool:
                 os.path.isfile(data_path)
                 and os.path.getsize(data_path) > _HNSW_MISSING_METADATA_DATA_FLOOR
             ):
-                return False
+                # data_level0.bin present but no metadata pickle. Normally a
+                # partial flush (vectors written, crash before the pickle) —
+                # unsafe to open. EXCEPTION: chromadb 1.5.x allocates
+                # data_level0.bin when a collection is created, and a collection
+                # that never crosses hnsw:sync_threshold (mempalace sets it to
+                # 50_000) keeps all rows in the WAL and writes no pickle, leaving
+                # a healthy *empty* stub whose header reports cur_element_count
+                # == 0. Treat only that case as healthy; a non-zero or
+                # unreadable count is a genuine partial flush.
+                if _hnsw_cur_element_count(seg_dir) != 0:
+                    return False
         except OSError:
             return False
 
-        # No metadata and no meaningful vector payload yet: fresh/empty segment.
+        # No metadata and no flushed vectors yet: fresh/empty segment.
         return True
 
     try:

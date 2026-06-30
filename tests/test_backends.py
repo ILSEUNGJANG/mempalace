@@ -2,6 +2,7 @@ import os
 import pickle
 import shutil
 import sqlite3
+import struct
 from contextlib import closing
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from mempalace.backends.chroma import (
     ChromaCollection,
     _HNSW_MISSING_METADATA_DATA_FLOOR,
     _fix_blob_seq_ids,
+    _hnsw_cur_element_count,
     _pin_hnsw_threads,
     _segment_appears_healthy,
     quarantine_invalid_hnsw_metadata,
@@ -713,6 +715,89 @@ def test_segment_without_metadata_and_tiny_data_is_still_treated_as_fresh(tmp_pa
     (seg / "data_level0.bin").write_bytes(b"\0" * _HNSW_MISSING_METADATA_DATA_FLOOR)
 
     assert _segment_appears_healthy(str(seg))
+
+
+def _hnsw_header_bytes(cur_element_count: int, elem_size: int = 1676) -> bytes:
+    """Craft a 100-byte chromadb-style HNSW header with the given
+    cur_element_count (uint32 LE @ offset 20) and size_data_per_element
+    (uint32 LE @ offset 28)."""
+    hb = bytearray(100)
+    struct.pack_into("<I", hb, 20, cur_element_count)
+    struct.pack_into("<I", hb, 28, elem_size)
+    return bytes(hb)
+
+
+def test_hnsw_cur_element_count_reads_header(tmp_path):
+    """_hnsw_cur_element_count parses cur_element_count from header.bin."""
+    seg = tmp_path / "seg"
+    seg.mkdir()
+    (seg / "header.bin").write_bytes(_hnsw_header_bytes(50000))
+    (seg / "data_level0.bin").write_bytes(b"\0" * (50000 * 1676))
+    assert _hnsw_cur_element_count(str(seg)) == 50000
+
+
+def test_hnsw_cur_element_count_none_without_header(tmp_path):
+    """No header.bin (or wrong-size header) => None, so callers stay conservative."""
+    seg = tmp_path / "seg"
+    seg.mkdir()
+    (seg / "data_level0.bin").write_bytes(b"\0" * 4096)
+    assert _hnsw_cur_element_count(str(seg)) is None
+    # Wrong-size header is also rejected (format guard).
+    (seg / "header.bin").write_bytes(b"\0" * 40)
+    assert _hnsw_cur_element_count(str(seg)) is None
+
+
+def test_hnsw_cur_element_count_none_when_data_too_small(tmp_path):
+    """A count data_level0.bin cannot hold => mis-read header => None."""
+    seg = tmp_path / "seg"
+    seg.mkdir()
+    (seg / "header.bin").write_bytes(_hnsw_header_bytes(50000))
+    (seg / "data_level0.bin").write_bytes(b"\0" * 2048)  # far too small for 50000
+    assert _hnsw_cur_element_count(str(seg)) is None
+
+
+def test_segment_empty_stub_zero_count_no_pickle_is_healthy(tmp_path):
+    """A never-flushed empty stub (data allocated, header cur_element_count=0,
+    no pickle) is healthy — chromadb 1.5.x allocates data_level0.bin at
+    collection creation; a sub-sync_threshold collection keeps all rows in the
+    WAL and writes no pickle. This is the closets-segment shape."""
+    seg = tmp_path / "abcd-1234-5678"
+    seg.mkdir()
+    (seg / "data_level0.bin").write_bytes(b"\0" * (100 * 1676))  # > floor
+    (seg / "header.bin").write_bytes(_hnsw_header_bytes(0))
+    (seg / "link_lists.bin").write_bytes(b"")  # empty graph
+    assert _segment_appears_healthy(str(seg))
+
+
+def test_segment_partial_flush_nonzero_count_no_pickle_is_unhealthy(tmp_path):
+    """Data + header reporting cur_element_count>0 + NO pickle is a genuine
+    partial flush (vectors written, crash before the metadata pickle)."""
+    seg = tmp_path / "abcd-1234-5678"
+    seg.mkdir()
+    (seg / "data_level0.bin").write_bytes(b"\0" * (50 * 1676))
+    (seg / "header.bin").write_bytes(_hnsw_header_bytes(50))
+    assert not _segment_appears_healthy(str(seg))
+
+
+def test_quarantine_stale_hnsw_leaves_empty_stub_alone(tmp_path):
+    """A stale-by-mtime but empty (cur_element_count=0) never-flushed stub must
+    NOT be quarantined — the closets collection's steady state."""
+    now = 1_700_000_000.0
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    (palace / "chroma.sqlite3").write_text("")
+    seg = palace / "abcd-1234-5678"
+    seg.mkdir()
+    (seg / "data_level0.bin").write_bytes(b"\0" * (100 * 1676))
+    (seg / "header.bin").write_bytes(_hnsw_header_bytes(0))
+    (seg / "link_lists.bin").write_bytes(b"")
+    os.utime(seg / "data_level0.bin", (now - 7200, now - 7200))
+    os.utime(palace / "chroma.sqlite3", (now, now))
+
+    moved = quarantine_stale_hnsw(str(palace), stale_seconds=3600.0)
+
+    assert moved == []
+    assert seg.exists()
 
 
 def test_quarantine_stale_hnsw_renames_missing_metadata_with_nontrivial_data(tmp_path):
