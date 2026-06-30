@@ -670,6 +670,41 @@ def _persisted_metadata_fields(obj: object) -> tuple[object, object]:
     return getattr(obj, "dimensionality", None), getattr(obj, "id_to_label", None)
 
 
+def _collection_dimension_for_segment(palace_path: str, segment_id: str) -> Optional[int]:
+    """Return the authoritative embedding dimension for a vector segment's
+    collection, read from ``chroma.sqlite3`` (``collections.dimension``).
+
+    chromadb 1.5.x stores the real dimensionality on the *collection*, not in
+    the HNSW ``index_metadata.pickle`` (whose ``dimensionality`` field is
+    written as ``None`` by the sync-threshold ``_persist`` even for a healthy,
+    fully-populated index — chromadb reads the real value from here on load).
+
+    Returns ``None`` when the db, the segment→collection row, or the dimension
+    is missing/unreadable — callers treat ``None`` as "no recoverable
+    dimension available".
+    """
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.isfile(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                """
+                SELECT c.dimension
+                FROM segments s
+                JOIN collections c ON s.collection = c.id
+                WHERE s.id = ?
+                """,
+                (segment_id,),
+            ).fetchone()
+            return row[0] if row and row[0] is not None else None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
 def quarantine_invalid_hnsw_metadata(palace_path: str) -> list[str]:
     """Quarantine segment dirs whose ``index_metadata.pickle`` is unreadable or invalid.
 
@@ -729,10 +764,23 @@ def quarantine_invalid_hnsw_metadata(palace_path: str) -> list[str]:
                 else:
                     has_labels = bool(id_to_label)
                     if has_labels and not _valid_dimensionality(dimensionality):
-                        reason = (
-                            "labels present but dimensionality is missing or invalid "
-                            f"({dimensionality!r})"
-                        )
+                        # chromadb 1.5.x's sync-threshold ``_persist`` writes
+                        # ``dimensionality=None`` into the pickle even for a
+                        # healthy, fully-populated index; the authoritative
+                        # value lives in ``collections.dimension`` (sqlite),
+                        # which chromadb reads on load. Opening such a segment
+                        # works (count + query succeed) — quarantining it would
+                        # instead discard a working on-disk index and force a
+                        # full WAL replay. Only treat a None/invalid pickle dim
+                        # as corruption when sqlite has no valid dim to recover
+                        # from either.
+                        sqlite_dim = _collection_dimension_for_segment(palace_path, name)
+                        if not _valid_dimensionality(sqlite_dim):
+                            reason = (
+                                "labels present but dimensionality is missing or invalid "
+                                f"({dimensionality!r}); sqlite collections.dimension is also "
+                                f"unusable ({sqlite_dim!r})"
+                            )
                     elif dimensionality is not None and not _valid_dimensionality(dimensionality):
                         reason = f"invalid dimensionality {dimensionality!r}"
 

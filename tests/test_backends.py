@@ -1022,6 +1022,44 @@ def test_quarantine_invalid_hnsw_metadata_allows_uninitialized_segment(tmp_path)
     assert seg.exists()
 
 
+def test_quarantine_keeps_none_dim_when_sqlite_dimension_valid(tmp_path):
+    """A None pickle dimensionality is BENIGN when chroma.sqlite3 carries a
+    valid collections.dimension.
+
+    chromadb 1.5.x's sync-threshold-triggered ``_persist`` writes
+    ``index_metadata.pickle`` with ``dimensionality=None`` even for a healthy,
+    fully-populated index — the authoritative dimension lives in
+    ``collections.dimension`` (sqlite), which chromadb reads on load. Opening
+    such a segment works (count + query succeed); quarantining it instead
+    THROWS AWAY a working on-disk index and forces a full WAL replay. So when
+    the collection's sqlite dimension is valid, the None pickle dim must NOT
+    trigger quarantine.
+    """
+    import sqlite3
+
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    # Real chromadb collection => populates collections.dimension + segments rows.
+    client = chromadb.PersistentClient(path=str(palace))
+    col = client.create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
+    col.add(ids=["a"], embeddings=[[0.1] * 8], documents=["x"], metadatas=[{"wing": "w"}])
+    del client
+
+    con = sqlite3.connect(str(palace / "chroma.sqlite3"))
+    seg_id = con.execute("SELECT id FROM segments WHERE scope='VECTOR'").fetchone()[0]
+    con.close()
+    seg = palace / seg_id
+    seg.mkdir(exist_ok=True)
+    # The chromadb-1.5.x None-dim-but-labelled shape for a healthy index.
+    with open(seg / "index_metadata.pickle", "wb") as f:
+        pickle.dump({"dimensionality": None, "id_to_label": {"a": 1, "b": 2}}, f)
+
+    moved = quarantine_invalid_hnsw_metadata(str(palace))
+
+    assert moved == []
+    assert seg.exists()
+
+
 def test_quarantine_invalid_hnsw_metadata_rejects_non_dict_id_to_label(tmp_path):
     palace = tmp_path / "palace"
     palace.mkdir()
