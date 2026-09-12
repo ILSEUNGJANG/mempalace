@@ -34,6 +34,7 @@ from .base import (
     QueryResult,
     UnsupportedFilterError,
     _IncludeSpec,
+    initialize_last_modified_metadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -1926,6 +1927,7 @@ class ChromaCollection(BaseCollection):
         misses a case (or skips for performance), reaching the chromadb
         client always goes through here first.
         """
+        metadatas = initialize_last_modified_metadata(metadatas)
         if metadatas is None:
             return None
         return [
