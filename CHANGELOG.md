@@ -18,7 +18,7 @@ Agents get lighter ways in: a 3-tool MCP server with Palace Query Language, shar
 
 - **`mempalace rules` no longer accepts `--agent`.** Pass `--host`, `--harness` and `--project`, then re-render any installed shared-brain block. (#2508)
 - **`get_collection()` refuses names MemPalace never reads.** Any name other than the configured drawers collection or `mempalace_closets` raises `CollectionNameMismatchError`; maintenance scripts can pass `_skip_name_check=True`. (#2446)
-- **Logstream listings without a cursor return the newest events first.** Pass `since_event_id` to resume in order, or set `order` explicitly. (#2497)
+- **The MCP event listing returns the newest events first when no cursor is given.** `mempalace_event_list` and `palace_coordinate` now default to newest-first unless `since_event_id` or `order` is passed; `mempalace logstream list` and `Logstream.list_events()` still default to oldest-first. (#2497)
 - **New installs keep config and palace under `~/.config/mempalace`** (or `$XDG_CONFIG_HOME/mempalace`). Existing `~/.mempalace` installs are unchanged. (#148)
 
 ### Performance & Architecture (Dual-Track Rust Engine)

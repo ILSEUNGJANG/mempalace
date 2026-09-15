@@ -207,7 +207,7 @@ Select with `--backend <name>`, `MEMPALACE_BACKEND=<name>`, or
 
 ### Native vector search
 
-`rust_exact` and the standalone `mempalace-native` CLI scan the same `sqlite_exact` database with a native Rust engine; complex filters, and installs without the native extension, fall back to Python. No benchmark figures are published for this release; `mempalace-native bench --db <sqlite_exact.sqlite3>` measures it on your own data. See [`crates/`](crates/) for the core workspace, PyO3 bindings, and native CLI.
+`rust_exact` and the standalone `mempalace-native` CLI scan the same `sqlite_exact` database with a native Rust engine. The `rust_exact` adapter falls back to the Python backend for complex filters, requests for returned embeddings, and installs without the native extension; the `mempalace-native` executable is Rust-only and has no Python fallback. No benchmark figures are published for this release; `mempalace-native bench --db <sqlite_exact.sqlite3>` measures it on your own data. See [`crates/`](crates/) for the core workspace, PyO3 bindings, and native CLI.
 
 ## Quickstart
 
