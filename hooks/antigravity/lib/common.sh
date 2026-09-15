@@ -153,13 +153,23 @@ mempal_log() {
 # Returns 0 (kill switch tripped, hook should short-circuit) or non-zero
 # (proceed normally).
 
+# Expand a leading "~" the way Path.expanduser() does for the current user.
+mempal_expand_home() {
+    case "$1" in
+        "~") printf '%s\n' "$HOME" ;;
+        "~/"*) printf '%s\n' "$HOME/${1#"~/"}" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
 # Print the config directory, resolved the way mempalace.config does (#148):
 # $MEMPALACE_CONFIG_DIR, then a ~/.mempalace that holds a real install, then
 # $XDG_CONFIG_HOME/mempalace (absolute values only), then ~/.config/mempalace.
+# Both environment values have a leading "~" expanded first, as in Python.
 mempal_config_dir() {
     case "${MEMPALACE_CONFIG_DIR:-}" in
         *[![:space:]]*)
-            printf '%s\n' "$MEMPALACE_CONFIG_DIR"
+            mempal_expand_home "$MEMPALACE_CONFIG_DIR"
             return
             ;;
     esac
@@ -169,9 +179,11 @@ mempal_config_dir() {
         printf '%s\n' "$legacy"
         return
     fi
-    case "${XDG_CONFIG_HOME:-}" in
+    local xdg
+    xdg="$(mempal_expand_home "${XDG_CONFIG_HOME:-}")"
+    case "$xdg" in
         /*|[A-Za-z]:[\\/]*)
-            printf '%s\n' "$XDG_CONFIG_HOME/mempalace"
+            printf '%s\n' "$xdg/mempalace"
             return
             ;;
     esac

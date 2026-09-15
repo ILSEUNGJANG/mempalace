@@ -1361,6 +1361,20 @@ def test_kill_switch_proceeds_for_explicit_config_dir(tmp_path: Path) -> None:
     assert _kill_switch_tripped(home, {"MEMPALACE_CONFIG_DIR": config_dir.as_posix()}) is False
 
 
+def test_kill_switch_expands_tilde_in_explicit_config_dir(tmp_path: Path) -> None:
+    """``MEMPALACE_CONFIG_DIR=~/alt`` resolves under HOME, as ``expanduser`` does."""
+    home = tmp_path / "home"
+    (home / "alt").mkdir(parents=True)
+    assert _kill_switch_tripped(home, {"MEMPALACE_CONFIG_DIR": "~/alt"}) is False
+
+
+def test_kill_switch_expands_tilde_in_xdg_config_home(tmp_path: Path) -> None:
+    """``XDG_CONFIG_HOME=~/xdg`` is absolute after expansion, as in Python."""
+    home = tmp_path / "home"
+    (home / "xdg" / "mempalace").mkdir(parents=True)
+    assert _kill_switch_tripped(home, {"XDG_CONFIG_HOME": "~/xdg"}) is False
+
+
 def test_kill_switch_legacy_dir_still_proceeds(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _ensure_palace(home)
