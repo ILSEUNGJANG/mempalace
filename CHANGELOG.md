@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+---
+
+## [3.10.0] — 2026-09-15
+
+Agents get lighter ways in: a 3-tool MCP server with Palace Query Language, shared-brain rules for `host:harness:project` identities, and optional native exact-vector search. New installs follow XDG, and storage fixes close a silent write-loss path, a macOS integrity refusal and several hangs.
+
+### Upgrade notes
+
+- **`mempalace rules` no longer accepts `--agent`.** Pass `--host`, `--harness` and `--project`, then re-render any installed shared-brain block. (#2508)
+- **`get_collection()` refuses names MemPalace never reads.** Any name other than the configured drawers collection or `mempalace_closets` raises `CollectionNameMismatchError`; maintenance scripts can pass `_skip_name_check=True`. (#2446)
+- **Logstream listings without a cursor return the newest events first.** Pass `since_event_id` to resume in order, or set `order` explicitly. (#2497)
+- **New installs keep config and palace under `~/.config/mempalace`** (or `$XDG_CONFIG_HOME/mempalace`). Existing `~/.mempalace` installs are unchanged. (#148)
+
 ### Performance & Architecture (Dual-Track Rust Engine)
 
 - **Optional native Rust exact-vector acceleration (`rust_exact`).**
@@ -15,9 +28,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   for large scans, and releases the Python GIL. Local and external writes
   invalidate the native cache. Loading is collection-scoped and decodes blobs
   safely; serial and parallel scans preserve deterministic tie ordering.
-  The initial Windows benchmark reported 557 MB RSS versus 2,430 MB for the
-  Python baseline, with 7.2-11.8 ms native warm latency across 168k/334k-row
-  workloads. These historical numbers have not been rerun after hardening.
   Complex filters and absent native extensions fall back to Python.
 
 - **Standalone native vector CLI and optional wheels.**
@@ -851,7 +861,8 @@ Initial public release.
 
 ---
 
-[Unreleased]: https://github.com/MemPalace/mempalace/compare/v3.9.0...HEAD
+[Unreleased]: https://github.com/MemPalace/mempalace/compare/v3.10.0...HEAD
+[3.10.0]: https://github.com/MemPalace/mempalace/compare/v3.9.0...v3.10.0
 [3.9.0]: https://github.com/MemPalace/mempalace/compare/v3.8.0...v3.9.0
 [3.8.0]: https://github.com/MemPalace/mempalace/compare/v3.7.1...v3.8.0
 [3.7.1]: https://github.com/MemPalace/mempalace/compare/v3.7.0...v3.7.1
