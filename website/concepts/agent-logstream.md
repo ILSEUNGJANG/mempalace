@@ -185,9 +185,9 @@ can treat process exit as "you have mail":
 
 ```bash
 mempalace logstream watch \
-  --agent mac-claude \
+  --agent mac:claude:myapp \
   --type task.request --type task.reply --type patch.ready \
-  --state-file ~/.mempalace/watch/mac-claude.json --json
+  --json
 ```
 
 `--agent` is shorthand for `--to-agent <id> --exclude-from-agent <id>`. That

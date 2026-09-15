@@ -761,11 +761,17 @@ def parse_exec_input(input_data: Any) -> Tuple[str, Dict[str, Any]]:  # noqa: C9
                 or "room" in params
             ):
                 action = "update_drawer"
+            elif "agent_name" in params and ("entry" in params or "content" in params):
+                action = "diary_write"
             elif "content" in params or "document" in params:
                 action = "add_drawer"
             elif "drawer_id" in params:
                 action = "delete_drawer"
-            elif "subject" in params and "predicate" in params and "old_object" in params:
+            elif (
+                "subject" in params
+                and "predicate" in params
+                and ("old_object" in params or "new_object" in params)
+            ):
                 action = "kg_supersede"
             elif (
                 "subject" in params
@@ -775,7 +781,9 @@ def parse_exec_input(input_data: Any) -> Tuple[str, Dict[str, Any]]:  # noqa: C9
                 action = "kg_add"
             elif "source_wing" in params and "target_wing" in params:
                 action = "create_tunnel"
-            elif "agent" in params and ("entry" in params or "content" in params):
+            elif ("agent" in params or "agent_name" in params) and (
+                "entry" in params or "content" in params
+            ):
                 action = "diary_write"
             elif "items" in params:
                 action = "checkpoint"
@@ -798,8 +806,16 @@ def parse_exec_input(input_data: Any) -> Tuple[str, Dict[str, Any]]:  # noqa: C9
             action = "kg_invalidate"
             if "ended" not in params and "valid_to" in params:
                 params["ended"] = params.pop("valid_to")
+        elif action in ("kg_supersede", "supersede"):
+            action = "kg_supersede"
+            if "old_object" not in params and "old" in params:
+                params["old_object"] = params.pop("old")
+            if "new_object" not in params and "new" in params:
+                params["new_object"] = params.pop("new")
         elif action in ("diary_write", "diary"):
             action = "diary_write"
+            if "agent_name" not in params and "agent" in params:
+                params["agent_name"] = params.pop("agent")
             if "diary" in params and isinstance(params["diary"], dict):
                 d = params.pop("diary")
                 params["entry"] = d.get("content") or d.get("entry") or d.get("text") or ""
@@ -807,6 +823,10 @@ def parse_exec_input(input_data: Any) -> Tuple[str, Dict[str, Any]]:  # noqa: C9
                     params["topic"] = d["topic"]
                 if "wing" in d:
                     params["wing"] = d["wing"]
+                if "agent" in d and "agent_name" not in params:
+                    params["agent_name"] = d["agent"]
+                elif "agent_name" in d and "agent_name" not in params:
+                    params["agent_name"] = d["agent_name"]
             elif "entry" not in params and "content" in params:
                 params["entry"] = params.pop("content")
         return action, params

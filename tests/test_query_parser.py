@@ -196,6 +196,12 @@ class TestPalaceExecParser:
             assert params["content"] == quoted
             assert isinstance(params["content"], str)
 
+    def test_structured_agent_name_plus_content_is_diary_write(self):
+        action, params = parse_exec_input({"agent_name": "bot", "content": "observation"})
+        assert action == "diary_write"
+        assert params["agent_name"] == "bot"
+        assert params.get("entry", params.get("content")) == "observation"
+
     def test_structured_drawer_id_plus_content_is_update(self):
         action, params = parse_exec_input({"drawer_id": "drw_1", "content": "replacement"})
         assert action == "update_drawer"

@@ -387,10 +387,12 @@ LIGHT_TOOLS = {
     "palace_query": {
         "description": (
             "Unified Palace Query Engine. Retrieve memories, taxonomy, knowledge graph facts/timelines, "
-            "tunnels, hallways, agent diaries, and palace status. "
+            "tunnels, hallways, agent diaries, palace status, and graph statistics. "
+            "Use palace_query for ALL read-only queries, inspections, status checks, and diary reads. "
+            "NEVER use palace_coordinate for reads or queries. "
             "Accepts a concise PQL DSL query string (e.g. 'FIND \"terms\" IN wing/room LIMIT 5', "
             "'TAXONOMY', 'KG Max AS OF 2026-04-01', 'TRAVERSE auth-flow HOPS 2', 'DIARY agent LAST 5', "
-            "'STATUS') or a structured dict payload."
+            "'STATUS') or a structured dict payload (e.g. {'target': 'search', 'query': 'terms', 'wing': 'patient_1042', 'room': 'labs', 'limit': 5})."
         ),
         "input_schema": {
             "type": "object",
@@ -471,6 +473,8 @@ LIGHT_TOOLS = {
             "Unified Palace Execution Engine. Add/update/delete drawers, batch checkpoint, knowledge graph "
             "fact lifecycle (add/invalidate/supersede), cross-wing tunnels, hallways, mining, sync, agent "
             "diaries, and maintenance. "
+            "IMPORTANT: Use palace_exec ONLY for intentional, authorized mutations. Drafting, proposing, "
+            "checking, reading, or explaining must NEVER call palace_exec. "
             "Accepts a concise command DSL string (e.g. 'ADD IN backend/auth \"content\"', "
             "'DELETE DRAWER drw_123', 'KG ADD Max -> loves -> chess', 'KG SUPERSEDE Max -> grade: 6 => 7', "
             "'MINE /path MODE projects', 'SYNC APPLY', 'RECONNECT') or a structured dict payload."
@@ -494,7 +498,19 @@ LIGHT_TOOLS = {
                 "room": {"type": "string", "description": "Target room (optional)"},
                 "content": {
                     "type": "string",
-                    "description": "Verbatim content to store/update (optional)",
+                    "description": "Verbatim content to store/update (optional; also accepted for diary_write)",
+                },
+                "agent_name": {
+                    "type": "string",
+                    "description": "Agent name for diary_write (required when action is diary_write)",
+                },
+                "entry": {
+                    "type": "string",
+                    "description": "Diary entry text for diary_write (required when action is diary_write; content also accepted)",
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "Topic category for diary_write (optional, default: 'general')",
                 },
                 "drawer_id": {
                     "type": "string",
@@ -508,20 +524,27 @@ LIGHT_TOOLS = {
                 "source": {"type": "string", "description": "Source path for mine (optional)"},
                 "subject": {
                     "type": "string",
-                    "description": "Subject for KG operations (optional)",
+                    "description": "Subject for KG operations (required for kg_add, kg_invalidate, kg_supersede)",
                 },
                 "predicate": {
                     "type": "string",
-                    "description": "Predicate for KG operations (optional)",
+                    "description": "Predicate for KG operations (required for kg_add, kg_invalidate, kg_supersede)",
                 },
-                "object": {"type": "string", "description": "Object for KG operations (optional)"},
+                "object": {
+                    "type": "string",
+                    "description": "Object for KG operations (required for kg_add, kg_invalidate)",
+                },
                 "old_object": {
                     "type": "string",
-                    "description": "Old object for KG supersede (optional)",
+                    "description": "Old object being replaced for KG supersede (required for kg_supersede)",
                 },
                 "new_object": {
                     "type": "string",
-                    "description": "New object for KG supersede (optional)",
+                    "description": "New replacement object for KG supersede (required for kg_supersede)",
+                },
+                "at": {
+                    "type": "string",
+                    "description": "Boundary instant for KG supersede (ISO date or datetime, optional; defaults to now UTC)",
                 },
                 "source_file": {
                     "type": "string",
@@ -553,6 +576,7 @@ LIGHT_TOOLS = {
         "description": (
             "Unified Multi-Agent Coordination Engine (RFC 003 / RFC 005). Immutable task delegation, "
             "logstream event append/list/wait/ack, artifact put/get, patch submission, and mesh estate snapshot. "
+            "DO NOT use for reading memories, viewing status, checking graph stats, or querying diaries (use palace_query instead). "
             "Accepts a concise coordination DSL string (e.g. 'TASK CREATE project:mempalace from:agent1 "
             'to:agent2 goal:"fix" branch:b base:c done:"done"\', \'EVENT APPEND type:task.request ...\', '
             "'EVENT INBOX to:agent', 'EVENT LIST stream:project/x [DESC|ASC] [LIMIT n] [PREVIEW]', "
@@ -851,6 +875,10 @@ def _alias_args_for_handler(handler, params: Dict[str, Any]) -> Dict[str, Any]:
         mapped["project_dir"] = mapped.pop("project")
     if "valid_to" in mapped and "ended" in names and "ended" not in mapped:
         mapped["ended"] = mapped.pop("valid_to")
+    if "old" in mapped and "old_object" in names and "old_object" not in mapped:
+        mapped["old_object"] = mapped.pop("old")
+    if "new" in mapped and "new_object" in names and "new_object" not in mapped:
+        mapped["new_object"] = mapped.pop("new")
     has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in names.values())
     if has_var_keyword:
         return mapped
