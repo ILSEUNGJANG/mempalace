@@ -39,6 +39,8 @@ RestartSec=2
 # about a second, which is under StartLimitBurst=5 per StartLimitIntervalSec=10s
 # at RestartSec=2. Preventing the restart lands the unit in `failed` with the
 # refusal reason in the journal, which is a state an operator can act on.
+# The server first waits up to MEMPALACE_MCP_WRITER_WAIT_SECONDS (default
+# 120) for the lease, so status 2 means that wait ran out.
 RestartPreventExitStatus=2
 
 # --- Hardening ---------------------------------------------------------------
