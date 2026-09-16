@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Security
+
+- **ChromaDB telemetry is disabled explicitly, not just silenced.** MemPalace only
+  raised the log level on `chromadb.telemetry.product.posthog`, leaving ChromaDB's
+  own `anonymized_telemetry=True` default in place. Nothing is transmitted on the
+  1.x line we support, where the posthog client is a no-op stub and posthog is not
+  a dependency, so this was never exploitable — but the default was ChromaDB's to
+  change. Every client the backend opens now passes
+  `Settings(anonymized_telemetry=False)`, and importing `mempalace` sets
+  `ANONYMIZED_TELEMETRY=False` (via `setdefault`, so an explicit operator export
+  still wins) for any other chromadb client in the process. (GHSA-8h77)
+
 ---
 
 ## [3.10.0] — 2026-09-15
