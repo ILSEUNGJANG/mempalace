@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **A `known_entities.json` write no longer appears to hang on Windows when the
+  directory refuses a temporary file.** `_publish_registry` falls back to writing
+  in place when the directory takes no new name, and it learned that from the
+  `EPERM` / `EACCES` / `EROFS` that `tempfile.mkstemp` raises. On Windows
+  `mkstemp` does not raise it: it reads a `PermissionError` as a name collision
+  and tries the next candidate, `tempfile.TMP_MAX` times. That is 20 on Python
+  3.13 and later, but `os.TMP_MAX` — 2,147,483,647 — on 3.12 and earlier, about
+  28 hours of retries at the measured rate, so the fallback never ran and the
+  write looked frozen. The temporary name is now opened directly with
+  `O_CREAT | O_EXCL`, retried only on a real collision and only a few times, so
+  the permission error reaches the fallback on every interpreter. (#2530)
+
 ### Upgrade notes
 
 - **`EntityRegistry.research()` and `confirm_research()` are removed.** They were
