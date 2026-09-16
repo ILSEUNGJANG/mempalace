@@ -11,8 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Upgrade notes
 
 - **`EntityRegistry.research()` and `confirm_research()` are removed.** They were
-  the only outbound network call in the package — a Wikipedia lookup for unknown
-  words. Nothing in the CLI, MCP server, miners or hooks called them, and the
+  a Wikipedia lookup for unknown words, and the only call the package could make
+  to a third-party service without the user configuring an endpoint. (The hub
+  client, `llm_client`, `closet_llm`, the openai-compat embedder and the Qdrant
+  backend also reach the network, but only to an address the user sets.) Nothing in the CLI, MCP server, miners or hooks called them, and the
   lookup was already opt-in and off by default, so no shipped code path reached
   the network. They are gone rather than merely gated, so local-first is a
   property of the code and not of a default argument. Existing `wiki_cache`
