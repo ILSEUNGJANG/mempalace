@@ -1047,6 +1047,37 @@ def run_detached_diary_checkpoint(payload_path: str) -> None:
         _maybe_auto_ingest()
 
 
+def _diary_write_locked(tool_diary_write, **kwargs) -> dict:
+    """File a diary entry while holding the MCP writer lease.
+
+    ``_apply_diary_checkpoint`` calls ``tool_diary_write`` in-process, not
+    through an MCP round trip, so nothing has promoted this process to writer.
+    On ``sqlite_exact``/``rust_exact`` ``_get_collection`` then opens the
+    palace read-only and the write fails with "attempt to write a readonly
+    database". Taking the same per-palace writer lease a real stdio MCP
+    server takes before mutating lets the collection open read/write.
+    """
+    from . import mcp_server as mcp
+    from .daemon import LOCK_REFUSAL_ERROR_CLASS
+
+    already_owned = mcp._MCP_WRITER_LOCK_CM is not None
+    acquired, reason = mcp._acquire_mcp_writer_lock()
+    if not acquired:
+        if not mcp._MCP_WRITER_LOCK_FAILED:
+            return {
+                "success": False,
+                "error": reason,
+                "error_class": LOCK_REFUSAL_ERROR_CLASS,
+            }
+        return {"success": False, "error": reason}
+    try:
+        result = tool_diary_write(**kwargs)
+    finally:
+        if not already_owned:
+            mcp._release_mcp_writer_lock()
+    return result if isinstance(result, dict) else {}
+
+
 def _apply_diary_checkpoint(payload: dict) -> bool:
     """File the checkpoint and write its ack. Only the child imports mcp_server."""
     from .daemon import LOCK_REFUSAL_ERROR_CLASS
@@ -1056,14 +1087,13 @@ def _apply_diary_checkpoint(payload: dict) -> bool:
     if not isinstance(entry, str) or not entry:
         return False
     for delay in _DIARY_LOCK_RETRY_DELAYS + (None,):
-        result = tool_diary_write(
+        result = _diary_write_locked(
+            tool_diary_write,
             agent_name=str(payload.get("agent_name") or "claude"),
             entry=entry,
             topic=str(payload.get("topic") or "checkpoint"),
             wing=str(payload.get("wing") or ""),
         )
-        if not isinstance(result, dict):
-            result = {}
         if result.get("success") or result.get("error_class") != LOCK_REFUSAL_ERROR_CLASS:
             break
         if delay is not None:
