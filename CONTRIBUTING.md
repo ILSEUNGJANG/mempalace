@@ -15,7 +15,17 @@ uv sync --extra dev
 
 # Or with pip in your own venv:
 # pip install -e ".[dev]"
+
+# Activate pre-commit hooks (one-time, per clone)
+pre-commit install
 ```
+
+The `pre-commit install` step is important: the repo has a
+`.pre-commit-config.yaml` that pins ruff to the exact version CI uses,
+but the actual git hook is per-machine and **must be installed
+locally**. Without this step, you can commit code that passes your
+local lint (using whatever ruff version you happen to have installed)
+but fails CI on push.
 
 ## Running Tests
 
@@ -24,6 +34,23 @@ uv run pytest tests/ -v
 ```
 
 All tests must pass before submitting a PR. Tests should run without API keys or network access.
+
+### Property-based tests (optional)
+
+`hypothesis` is available in the dev extras for property-based tests:
+
+```python
+from hypothesis import given, strategies as st
+
+@given(st.text(min_size=1, max_size=40))
+def test_function_never_fabricates_output_on_random_input(s):
+    # ... property that must hold for ANY string in the strategy
+```
+
+Hypothesis generates hundreds of inputs per test and shrinks failing
+cases to a minimal counterexample. Useful any time a function returns
+`Optional[X]` or has a wide input domain — it catches the failure-space
+gaps that hand-written positive tests miss.
 
 ## Running Benchmarks
 
@@ -61,6 +88,37 @@ assets/             ← logo + brand
    - `bench: add LoCoMo turn-level metrics`
 6. Push to your fork and open a PR against `develop`
 
+## Branching Model
+
+- **Feature and fix PRs should target `develop`.** This is the integration branch where all day-to-day work lands.
+- **`main` is reserved for tagged, stable releases.** Releases are promoted by merging `develop` into `main` (e.g., `v3.7.0`, `v3.6.0`).
+- Only emergency hotfixes should branch directly off — and target — `main`.
+
+## Checking release versions
+
+Before preparing a release, run the same consistency check as CI:
+
+```bash
+python scripts/check_versions.py
+```
+
+The checker compares thirteen version values in eleven files, using
+`mempalace/version.py` as the reference: `pyproject.toml`, the Claude, Codex and
+DSH manifests, the OpenClaw skill frontmatter, the README version badge, the
+editable MemPalace entry in `uv.lock`, the Cargo workspace version, and the three
+MemPalace workspace-package entries in `Cargo.lock`. Other dependency versions
+are outside this check.
+
+It reports missing, ambiguous or mismatched entries and exits with a nonzero
+status. It reads the release files without modifying them. On Python 3.10,
+it uses the `tomli` dependency installed with MemPalace; newer Python
+versions use the standard library TOML parser.
+
+The Version Guard workflow runs this check when guarded files change and on
+`v*` tag pushes. Stable tags must also match the reference version; prerelease
+tags retain their existing exemption from that tag comparison. Release-version
+edits remain a separate release-preparation step.
+
 ## Code Style
 
 - **Formatting**: [Ruff](https://docs.astral.sh/ruff/) with 100-char line limit (configured in `pyproject.toml`)
@@ -92,7 +150,7 @@ If you're planning a significant change, open an issue first to discuss the appr
 
 - **Discord**: [Join us](https://discord.com/invite/ycTQQCu6kn)
 - **Issues**: Bug reports and feature requests welcome
-- **Discussions**: For questions and ideas
+- **Questions and ideas**: Please use Discord or open an issue while GitHub Discussions are not enabled for this repo
 
 ## License
 

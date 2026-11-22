@@ -6,8 +6,8 @@ stopping to report errors and attempt remediation before proceeding.
 ## Step 1: Check Python version
 
 Run `python3 --version` (or `python --version` on Windows) and confirm the
-version is 3.9 or higher. If Python is not found or the version is too old,
-tell the user they need Python 3.9+ installed and stop.
+version is 3.10 or higher. If Python is not found or the version is too old,
+tell the user they need Python 3.10+ installed and stop.
 
 ## Step 2: Check if mempalace is already installed
 
@@ -59,9 +59,13 @@ If this fails, report the error and stop.
 
 ## Step 6: Configure MCP server
 
-Run the following command to register the MemPalace MCP server with Claude:
+Run the command for the AI client the user is configuring:
 
+    # Claude Code
     claude mcp add mempalace -- mempalace-mcp
+
+    # Codex CLI
+    codex mcp add mempalace -- mempalace-mcp
 
 If this fails, report the error but continue to the next step (MCP
 configuration can be done manually later).

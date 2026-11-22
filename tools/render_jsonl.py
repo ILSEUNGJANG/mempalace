@@ -9,7 +9,7 @@ JSONL into a clean .txt so you can keep / read / share it without the tooling.
 Usage:
     python3 render_jsonl.py <input.jsonl> [output.txt]
 
-Stdlib only. Python 3.9+. Read-only on the input.
+Stdlib only. Python 3.10+. Read-only on the input.
 """
 
 import json
@@ -70,7 +70,7 @@ def main():
     ]
     out.write("\n".join(header))
     for ts, role, text in turns:
-        out.write(f"\n[{ts}] {role.upper()}\n{text}\n\n{'-'*72}\n")
+        out.write(f"\n[{ts}] {role.upper()}\n{text}\n\n{'-' * 72}\n")
     if out is not sys.stdout:
         out.close()
         print(f"Wrote {len(turns)} turns to {sys.argv[2]}")

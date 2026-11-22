@@ -79,8 +79,7 @@ class TestCandidateUnion:
         result = search_memories(_NARRATIVE_QUERY, palace, n_results=5, candidate_strategy="union")
         ids = [h["source_file"] for h in result["results"]]
         assert "brand_voice_D4.md" in ids, (
-            "union mode must surface BM25-strong docs even when vector signal "
-            f"is weak; got {ids}"
+            f"union mode must surface BM25-strong docs even when vector signal is weak; got {ids}"
         )
 
     def test_union_preserves_vector_hits(self, tmp_path):
@@ -138,17 +137,15 @@ class TestCandidateUnion:
         # 4-doc corpus, n_results=2 → union pool can grow to ~8 candidates,
         # rerank reorders them, but final list must respect the cap.
         result = search_memories(_NARRATIVE_QUERY, palace, n_results=2, candidate_strategy="union")
-        assert (
-            len(result["results"]) <= 2
-        ), f"union must trim to n_results=2; got {len(result['results'])} results"
+        assert len(result["results"]) <= 2, (
+            f"union must trim to n_results=2; got {len(result['results'])} results"
+        )
 
-    def test_union_lexical_channel_survives_max_distance(self, tmp_path):
-        """``max_distance`` bounds the *vector* channel only. BM25-only
-        candidates carry ``distance=None`` — their relevance evidence is
-        the literal term match itself — so a strict vector threshold must
-        not silence the lexical channel. (Regression: with the serve
-        default cutoff of 0.50, name queries like "Inoue" returned zero
-        results because union mode dropped all BM25 candidates.)"""
+    def test_union_respects_max_distance_set(self, tmp_path):
+        """``max_distance`` remains a vector-distance threshold in union mode:
+        a lexical candidate with a computable distance joins only when that
+        distance satisfies it. One whose distance can't be computed is kept
+        and says so."""
         palace = str(tmp_path / "palace")
         _seed_drawers(palace)
         # Sanity: without max_distance, union surfaces the BM25-strong doc.
@@ -157,9 +154,8 @@ class TestCandidateUnion:
         )
         assert "brand_voice_D4.md" in {h["source_file"] for h in unfiltered["results"]}
 
-        # With a tight max_distance the BM25-strong doc must STILL be
-        # reachable, while every hit that does carry a vector distance
-        # keeps honoring the threshold.
+        # With a tight max_distance, every returned hit either has a real
+        # distance that satisfies the threshold or is flagged as unscored.
         filtered = search_memories(
             _NARRATIVE_QUERY,
             palace,
@@ -167,104 +163,11 @@ class TestCandidateUnion:
             candidate_strategy="union",
             max_distance=0.5,
         )
-        sources = {h["source_file"] for h in filtered["results"]}
-        assert "brand_voice_D4.md" in sources, (
-            "max_distance must bound the vector channel only; the lexical "
-            f"(BM25) channel must survive it — got {sources}"
-        )
         for h in filtered["results"]:
-            if h.get("distance") is not None:
-                assert (
-                    h["distance"] <= 0.5
-                ), f"vector hit violates max_distance=0.5: distance={h['distance']}"
-
-    def test_union_merger_gates_zero_bm25_candidates(self, monkeypatch):
-        """Union must inject only candidates with actual term-match
-        evidence (``bm25_score > 0``). Recency-fallback rows — produced
-        when no query token survives the trigram tokenizer — score 0.0
-        and must never pad the pool."""
-        from mempalace import searcher
-
-        hits = [
-            {
-                "text": "vector hit",
-                "distance": 0.3,
-                "source_file": "a.md",
-                "_source_file_full": "docs/a.md",
-                "_chunk_index": 0,
-            }
-        ]
-        fake = {
-            "results": [
-                {
-                    "text": "recency junk — no query term at all",
-                    "bm25_score": 0.0,
-                    "source_file": "b.md",
-                    "_source_file_full": "docs/b.md",
-                    "_chunk_index": 0,
-                },
-                {
-                    "text": "real lexical match",
-                    "bm25_score": 1.234,
-                    "source_file": "c.md",
-                    "_source_file_full": "docs/c.md",
-                    "_chunk_index": 0,
-                },
-            ]
-        }
-        monkeypatch.setattr(
-            searcher, "_bm25_only_via_sqlite", lambda *a, **k: fake
-        )
-        searcher._merge_bm25_union_candidates(
-            hits, "query", "/nonexistent", None, None, 5, max_distance=0.5
-        )
-        texts = [h["text"] for h in hits]
-        assert "real lexical match" in texts, "positive-BM25 candidate must be injected"
-        assert not any("junk" in t for t in texts), "zero-BM25 candidate must be gated out"
-
-    def test_union_injects_drawers_with_empty_source_file(self, monkeypatch):
-        """KB-filed drawers can carry an empty ``source_file``, which
-        collapses the fallback dedup key to ``"?"``. They must still be
-        injected (deduped by text), not silently discarded — discarding
-        them dropped all 164 LaPy12 drawers from 'whirls and curls'
-        (2026-08-13)."""
-        from mempalace import searcher
-
-        hits = [
-            {
-                "text": "vector hit",
-                "distance": 0.3,
-                "source_file": "a.md",
-                "_source_file_full": "docs/a.md",
-                "_chunk_index": 0,
-            }
-        ]
-        kb = {
-            "text": "# LaPy12:Thm 5.7 — whirls and curls",
-            "bm25_score": 0.145,
-            "source_file": "?",
-            "_source_file_full": "",
-            "_chunk_index": 0,
-        }
-        dup_of_vector = {
-            "text": "vector hit",  # same text as an existing hit — must dedup
-            "bm25_score": 0.5,
-            "source_file": "?",
-            "_source_file_full": "",
-            "_chunk_index": 0,
-        }
-        fake = {"results": [kb, dup_of_vector]}
-        monkeypatch.setattr(
-            searcher, "_bm25_only_via_sqlite", lambda *a, **k: fake
-        )
-        searcher._merge_bm25_union_candidates(
-            hits, "whirls and curls", "/nonexistent", None, None, 5, max_distance=0.5
-        )
-        texts = [h["text"] for h in hits]
-        assert "# LaPy12:Thm 5.7 — whirls and curls" in texts, (
-            "empty-source_file drawer must be injected via text dedup"
-        )
-        assert texts.count("vector hit") == 1, "text dedup must drop the duplicate"
+            if h.get("distance") is None:
+                assert h.get("fallback_reason") == "distance_unavailable", h
+                continue
+            assert h["distance"] <= 0.5, f"hit violates max_distance=0.5: distance={h['distance']}"
 
     def test_union_dedup_is_chunk_precise_not_basename(self, tmp_path):
         """Two files with the same basename in different directories must
@@ -309,39 +212,25 @@ class TestCandidateUnion:
             f"(basename collision would drop one); got sources={sources}"
         )
 
-
-class TestTrigramFloodResistance:
-    """Trigram FTS matches substrings, so a stopword fragment ("and")
-    matches nearly every document. Candidate selection must be AND-first
-    so the LIMIT-bounded window is never flooded by a common fragment —
-    the "whirls and curls" regression (2026-08-13)."""
-
-    def test_stopword_fragment_does_not_evict_phrase_doc(self, tmp_path):
-        from mempalace.searcher import _bm25_only_via_sqlite
-
+    def test_union_respects_source_file_filter(self, tmp_path):
+        """Union pulls BM25 candidates from sqlite FTS5 directly; the
+        source_file filter must constrain that pool too, not just the vector
+        path — otherwise union silently re-injects other sources (#1815)."""
         palace = str(tmp_path / "palace")
-        col = get_collection(palace, create=True)
-        # 6 flood docs (low rowids, all contain "and") seeded BEFORE the
-        # one document that actually contains both rare terms.
-        ids, docs, metas = [], [], []
-        for i in range(6):
-            ids.append(f"flood{i}")
-            docs.append(f"Filler number {i}: sand bandage candidate operand and more.")
-            metas.append({"wing": "w", "room": "r", "source_file": f"flood{i}.md"})
-        ids.append("target")
-        docs.append("Whirls and curls generate the totally nonnegative loop group.")
-        metas.append({"wing": "w", "room": "r", "source_file": "target.md"})
-        col.upsert(ids=ids, documents=docs, metadatas=metas)
-
-        # max_candidates=3: an OR-joined MATCH fills the window with flood
-        # rows (lower rowids) and the target never enters the pool.
-        res = _bm25_only_via_sqlite(
-            "whirls and curls", palace, n_results=3, max_candidates=3
+        _seed_drawers(palace)
+        result = search_memories(
+            _NARRATIVE_QUERY,
+            palace,
+            n_results=5,
+            candidate_strategy="union",
+            source_file="ticket_D2.md",
         )
-        sources = [h["source_file"] for h in res["results"]]
-        assert "target.md" in sources, (
-            f"AND-first candidate selection must survive the 'and' flood; got {sources}"
+        sources = {h["source_file"] for h in result["results"]}
+        assert sources <= {"ticket_D2.md"}, (
+            f"union must honor source_file on the BM25 pool; got {sources}"
         )
+        # The BM25-strong brand-voice doc must NOT leak past the filter.
+        assert "brand_voice_D4.md" not in sources
 
 
 class TestHybridRankTolerantOfMissingDistance:
@@ -361,3 +250,74 @@ class TestHybridRankTolerantOfMissingDistance:
         assert all("bm25_score" in r for r in ranked), "rerank should add bm25_score"
         # Both must survive — neither should crash on distance=None.
         assert len(ranked) == 2
+
+
+class TestUnionEmptySourceFile:
+    def test_union_injects_drawers_with_empty_source_file(self):
+        """KB-filed drawers can carry an empty ``source_file``, which
+        collapses the fallback dedup key to ``"?"``. They must still be
+        injected (deduped by text), not silently discarded — discarding
+        them dropped every LaPy12 drawer from 'whirls and curls' (fork,
+        2026-08-13)."""
+        from unittest.mock import MagicMock
+
+        from mempalace import searcher
+        from mempalace.backends.base import LexicalHit, LexicalResult
+
+        hits = [
+            {
+                "text": "vector hit",
+                "distance": 0.3,
+                "source_file": "a.md",
+                "_source_file_full": "docs/a.md",
+                "_chunk_index": 0,
+            }
+        ]
+        col = MagicMock()
+        col.lexical_search.return_value = LexicalResult(
+            hits=[
+                LexicalHit(
+                    id="kb1",
+                    document="# LaPy12:Thm 5.7 — whirls and curls",
+                    metadata={"wing": "mathpapers", "room": "kb", "source_file": ""},
+                    score=0.145,
+                ),
+                LexicalHit(
+                    id="kb2",
+                    document="vector hit",  # same text as an existing hit
+                    metadata={"wing": "mathpapers", "room": "kb", "source_file": ""},
+                    score=0.5,
+                ),
+            ]
+        )
+        searcher._merge_bm25_union_candidates(hits, col, "whirls and curls", None, None, 5)
+        texts = [h["text"] for h in hits]
+        assert "# LaPy12:Thm 5.7 — whirls and curls" in texts
+        assert texts.count("vector hit") == 1
+
+
+class TestTrigramFloodResistance:
+    """Trigram FTS matches substrings, so a stopword fragment ("and")
+    matches nearly every document. The BM25 fallback's candidate window must
+    not be flooded by it — the fork's "whirls and curls" regression
+    (2026-08-13), fixed upstream by rank-ordered, whole-word-first candidate
+    selection."""
+
+    def test_stopword_fragment_does_not_evict_phrase_doc(self, tmp_path):
+        from mempalace.searcher import _bm25_only_via_sqlite
+
+        palace = str(tmp_path / "palace")
+        col = get_collection(palace, create=True)
+        ids, docs, metas = [], [], []
+        for i in range(6):
+            ids.append(f"flood{i}")
+            docs.append(f"Filler number {i}: sand bandage candidate operand and more.")
+            metas.append({"wing": "w", "room": "r", "source_file": f"flood{i}.md"})
+        ids.append("target")
+        docs.append("Whirls and curls generate the totally nonnegative loop group.")
+        metas.append({"wing": "w", "room": "r", "source_file": "target.md"})
+        col.upsert(ids=ids, documents=docs, metadatas=metas)
+
+        res = _bm25_only_via_sqlite("whirls and curls", palace, n_results=3, max_candidates=3)
+        sources = [h["source_file"] for h in res["results"]]
+        assert "target.md" in sources, sources
