@@ -23,6 +23,7 @@ from .palace import get_closets_collection, get_collection
 _CLOSET_DRAWER_REF_RE = re.compile(r"→([\w,]+)")
 
 logger = logging.getLogger("mempalace_mcp")
+_MAX_ROOM_SHARDS_FOR_WING_VECTOR_FALLBACK = 64
 
 
 class SearchError(Exception):
@@ -174,6 +175,127 @@ def build_where_filter(wing: str = None, room: str = None) -> dict:
     elif room:
         return {"room": room}
     return {}
+
+
+def _is_chroma_id_lookup_error(exc: Exception) -> bool:
+    """Return True for Chroma's transient/stale HNSW id lookup failure."""
+    msg = str(exc)
+    return "Error finding id" in msg or "Internal error" in msg
+
+
+def _rooms_for_wing_via_sqlite(
+    palace_path: str,
+    wing: str,
+    collection_name: str = None,
+    max_rooms: int = _MAX_ROOM_SHARDS_FOR_WING_VECTOR_FALLBACK,
+) -> list | None:
+    """Return distinct rooms for ``wing`` from Chroma's SQLite metadata.
+
+    Chroma vector query can fail on broad ``where={"wing": ...}`` filters
+    while narrower ``wing+room`` filters still work. Room-sharding preserves
+    vector search quality for textbook-style wings with a small room count.
+    Returning ``None`` tells callers to use the SQLite BM25 fallback instead
+    of issuing an unbounded number of vector queries for very large wings.
+    """
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not wing or not os.path.isfile(db_path):
+        return None
+    if collection_name is None:
+        from .config import get_configured_collection_name
+
+        collection_name = get_configured_collection_name()
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT room_m.string_value
+                FROM embedding_metadata wing_m
+                JOIN embedding_metadata room_m
+                  ON room_m.id = wing_m.id AND room_m.key = 'room'
+                JOIN embeddings e ON e.id = wing_m.id
+                JOIN segments s ON e.segment_id = s.id
+                JOIN collections c ON s.collection = c.id
+                WHERE wing_m.key = 'wing'
+                  AND wing_m.string_value = ?
+                  AND c.name = ?
+                  AND room_m.string_value IS NOT NULL
+                ORDER BY room_m.string_value
+                LIMIT ?
+                """,
+                (wing, collection_name, max_rooms + 1),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        logger.debug("room discovery for wing=%s failed", wing, exc_info=True)
+        return None
+
+    rooms = [row[0] for row in rows if row[0]]
+    if len(rooms) > max_rooms:
+        logger.debug(
+            "wing=%s has more than %d rooms; using BM25 fallback instead of room shards",
+            wing,
+            max_rooms,
+        )
+        return None
+    return rooms
+
+
+def _query_wing_by_room_shards(
+    drawers_col,
+    query: str,
+    palace_path: str,
+    wing: str,
+    n_results: int,
+    collection_name: str = None,
+) -> dict | None:
+    """Run vector search for a wing by querying each room separately.
+
+    This is a targeted recovery path for Chroma's broad wing-filter id lookup
+    failures. If room discovery or any shard query fails, return ``None`` so
+    the caller can fall back to the SQLite BM25 path with complete scoped
+    coverage rather than returning partial vector results.
+    """
+    rooms = _rooms_for_wing_via_sqlite(palace_path, wing, collection_name=collection_name)
+    if rooms is None:
+        return None
+
+    docs: list = []
+    metas: list = []
+    dists: list = []
+    failed_rooms: list = []
+    for room_name in rooms:
+        try:
+            shard_results = drawers_col.query(
+                query_texts=[query],
+                n_results=n_results * 3,
+                include=["documents", "metadatas", "distances"],
+                where={"$and": [{"wing": wing}, {"room": room_name}]},
+            )
+        except Exception:
+            logger.debug(
+                "room-sharded vector search failed for wing=%s room=%s",
+                wing,
+                room_name,
+                exc_info=True,
+            )
+            failed_rooms.append(room_name)
+            continue
+        docs.extend(_first_or_empty(shard_results, "documents"))
+        metas.extend(_first_or_empty(shard_results, "metadatas"))
+        dists.extend(_first_or_empty(shard_results, "distances"))
+
+    if failed_rooms and not docs:
+        return None
+
+    return {
+        "documents": [docs],
+        "metadatas": [metas],
+        "distances": [dists],
+        "_failed_rooms": failed_rooms,
+    }
 
 
 def _extract_drawer_ids_from_closet(closet_doc: str) -> list:
@@ -393,12 +515,14 @@ def _bm25_only_via_sqlite(
     with the same Okapi-BM25 used in :func:`_hybrid_rank` so the result
     shape matches the vector path.
 
-    The query is split into ≥3-char trigram-tokens and OR-joined for the
-    FTS5 MATCH — chromadb writes the index with ``tokenize='trigram'``,
-    so single-character tokens never match. When no usable token survives
-    (e.g. "is a"), candidate selection falls back to the most-recent
-    ``max_candidates`` rows so we still return *something* rather than
-    nothing.
+    The query is split into ≥3-char trigram-tokens — chromadb writes the
+    index with ``tokenize='trigram'``, so shorter tokens never match and
+    every token matches as a SUBSTRING. Candidate selection is AND-first
+    (all tokens required; common fragments like "and" then only narrow),
+    widening per-token from the longest token down when AND is too strict.
+    When no usable token survives (e.g. "is a"), candidate selection falls
+    back to the most-recent ``max_candidates`` rows so we still return
+    *something* rather than nothing.
     """
     db_path = os.path.join(palace_path, "chroma.sqlite3")
     if not os.path.isfile(db_path):
@@ -448,9 +572,9 @@ def _bm25_only_via_sqlite(
         candidate_ids: list[int] = []
         use_recency_fallback = not tokens
         if tokens:
-            fts_query = " OR ".join(tokens)
             filter_sql, filter_params = _metadata_filter_sql("embedding_fulltext_search.rowid")
-            try:
+
+            def _fts_candidates(match_expr: str, limit: int) -> list[int]:
                 rows = conn.execute(
                     f"""
                     SELECT embedding_fulltext_search.rowid
@@ -463,9 +587,38 @@ def _bm25_only_via_sqlite(
                     {filter_sql}
                     LIMIT ?
                     """,
-                    (fts_query, collection_name, *filter_params, max_candidates),
+                    (match_expr, collection_name, *filter_params, limit),
                 ).fetchall()
-                candidate_ids = [r[0] for r in rows]
+                return [r[0] for r in rows]
+
+            quoted = ['"' + t.replace('"', '""') + '"' for t in tokens]
+            try:
+                # AND-first: the trigram tokenizer matches SUBSTRINGS, so an
+                # OR over all tokens lets a common fragment ("and", "the")
+                # flood the LIMIT-bounded candidate window with unrelated
+                # rows selected in arbitrary rowid order — the 2026-08-13
+                # "whirls and curls" regression, where the flood evicted
+                # every document containing the actual phrase. Requiring
+                # all tokens (FTS5 implicit AND) makes stopword fragments
+                # harmless: they only ever narrow the result.
+                candidate_ids = _fts_candidates(" ".join(quoted), max_candidates)
+                if len(candidate_ids) < n_results * 3 and len(tokens) > 1:
+                    # AND too strict (e.g. a rare term plus a typo) — widen
+                    # per-token, most-selective-first (length as the proxy),
+                    # skipping short tokens that would reintroduce the flood.
+                    seen = set(candidate_ids)
+                    per_token = max(n_results * 3, max_candidates // len(tokens))
+                    for tok in sorted(tokens, key=len, reverse=True):
+                        if len(tok) < 4 or len(candidate_ids) >= max_candidates:
+                            continue
+                        for rid in _fts_candidates(
+                            '"' + tok.replace('"', '""') + '"', per_token
+                        ):
+                            if rid not in seen:
+                                seen.add(rid)
+                                candidate_ids.append(rid)
+                            if len(candidate_ids) >= max_candidates:
+                                break
             except sqlite3.Error:
                 # FTS5 tokenizer mismatch or syntax error — fall through
                 # to the recency-window selector below.
@@ -638,15 +791,16 @@ def _merge_bm25_union_candidates(
     BM25-only additions carry ``distance=None`` so ``_hybrid_rank`` scores
     them on BM25 contribution alone.
 
-    When ``max_distance > 0.0`` (a strict vector-distance threshold is
-    set), BM25-only candidates are skipped entirely — they have no vector
-    distance to satisfy the threshold, and silently injecting them would
-    break the existing ``max_distance`` guarantee that hybrid results lie
-    within the requested vector-distance bound.
+    ``max_distance`` bounds the *vector* channel only (filtering happens
+    in the vector-hit loop upstream). BM25-only candidates carry no vector
+    distance — their relevance evidence is the literal term match itself —
+    so they are injected regardless of the threshold, gated instead on
+    ``bm25_score > 0`` so recency-fallback rows (no term-match evidence,
+    score 0.0) never pad the pool. Historical note: until 2026-08-13 this
+    helper skipped ALL BM25 candidates whenever ``max_distance > 0.0``,
+    which silenced the lexical channel under the serve default cutoff and
+    made short/name queries ("Inoue") return nothing.
     """
-    if max_distance > 0.0:
-        return
-
     try:
         bm25_extra = _bm25_only_via_sqlite(
             query,
@@ -671,15 +825,73 @@ def _merge_bm25_union_candidates(
         return entry.get("source_file")
 
     seen = {_dedup_key(h) for h in hits}
+    # KB-filed drawers can carry an EMPTY source_file in chroma metadata,
+    # collapsing their fallback dedup key to "?". Skipping those (the old
+    # behavior) silently discarded every such drawer from the lexical
+    # channel — the palace's mathpapers wing lost all 164 LaPy12 hits for
+    # "whirls and curls" while Vault chunks (real source_file) survived.
+    # Dedup them by document text instead, mirroring
+    # ``_merge_bm25_fallback_candidates``.
+    seen_texts = {h.get("text") for h in hits}
     for bh in bm25_extra:
         key = _dedup_key(bh)
-        if not key or key == "?" or key in seen:
+        if not key or key == "?":
+            text = bh.get("text")
+            if not text or text in seen_texts:
+                continue
+            seen_texts.add(text)
+        elif key in seen:
+            continue
+        # Term-match gate: only candidates with real BM25 evidence enter
+        # the pool. (bm25_score is rounded to 3 decimals upstream; a match
+        # weak enough to round to 0.000 carries no usable signal anyway.)
+        if bh.get("bm25_score", 0.0) <= 0.0:
             continue
         bh["distance"] = None
         bh["effective_distance"] = None
         bh["closet_boost"] = 0.0
         hits.append(bh)
         seen.add(key)
+
+
+def _merge_bm25_fallback_candidates(
+    hits: list,
+    query: str,
+    palace_path: str,
+    wing: str,
+    room: str,
+    n_results: int,
+    collection_name: str = None,
+) -> None:
+    """Append SQLite BM25 candidates after a partial vector-filter failure.
+
+    Unlike candidate_strategy="union", this path deliberately ignores
+    ``max_distance`` because Chroma already failed to provide complete vector
+    coverage for the requested scope. Results are marked ``bm25_sqlite`` and
+    keep ``distance=None``.
+    """
+    try:
+        bm25_extra = _bm25_only_via_sqlite(
+            query,
+            palace_path,
+            wing=wing,
+            room=room,
+            n_results=n_results * 3,
+            collection_name=collection_name,
+        ).get("results", [])
+    except Exception:
+        logger.debug("partial vector fallback: BM25 fetch failed", exc_info=True)
+        return
+
+    seen_texts = {h.get("text", "") for h in hits}
+    for bh in bm25_extra:
+        text = bh.get("text", "")
+        if not text or text in seen_texts:
+            continue
+        bh["effective_distance"] = None
+        bh["closet_boost"] = 0.0
+        hits.append(bh)
+        seen_texts.add(text)
 
 
 # Strategy dispatch — keeps search_memories' branch count under the
@@ -768,9 +980,10 @@ def search_memories(
               per query; perf cost is small but unmeasured at corpus scale.
               Opt in until the cost is characterized.
 
-              When ``max_distance > 0.0`` is also set, BM25-only candidates
-              are skipped — they have no vector distance and would silently
-              violate the requested distance threshold.
+              ``max_distance`` bounds the vector channel only: vector hits
+              beyond the threshold are filtered as usual, while BM25-only
+              candidates (``distance=None``, ``bm25_score > 0``) are still
+              merged — a literal term match is its own relevance evidence.
     """
     # Validate the strategy eagerly so invalid values fail the same way
     # regardless of whether the call routes through the vector path or
@@ -805,6 +1018,8 @@ def search_memories(
     # This avoids the "weak-closets regression" where narrative content
     # produces low-signal closets (regex extraction matches few topics)
     # and closet-first routing hides drawers that direct search would find.
+    drawer_query_fallback = None
+    drawer_query_failed_rooms: list = []
     try:
         dkwargs = {
             "query_texts": [query],
@@ -815,7 +1030,39 @@ def search_memories(
             dkwargs["where"] = where
         drawer_results = drawers_col.query(**dkwargs)
     except Exception as e:
-        return {"error": f"Search error: {e}"}
+        if not _is_chroma_id_lookup_error(e):
+            return {"error": f"Search error: {e}"}
+
+        if wing and not room:
+            drawer_results = _query_wing_by_room_shards(
+                drawers_col,
+                query,
+                palace_path,
+                wing,
+                n_results,
+                collection_name=collection_name,
+            )
+            if drawer_results is not None:
+                drawer_query_fallback = "room_sharded_vector"
+                drawer_query_failed_rooms = drawer_results.get("_failed_rooms", [])
+            else:
+                drawer_results = None
+        else:
+            drawer_results = None
+
+        if drawer_results is None:
+            fallback = _bm25_only_via_sqlite(
+                query,
+                palace_path,
+                wing=wing,
+                room=room,
+                n_results=n_results,
+                collection_name=collection_name,
+            )
+            if "error" not in fallback:
+                fallback["fallback_reason"] = "vector_filter_id_lookup_error"
+                fallback["vector_error"] = str(e)
+            return fallback
 
     # Gather closet hits (best-per-source) to build a boost lookup.
     closet_boost_by_source: dict = {}  # source_file -> (rank, closet_dist, preview)
@@ -962,12 +1209,24 @@ def search_memories(
         h["drawer_index"] = best_idx
         h["total_drawers"] = len(ordered_docs)
 
+    if drawer_query_failed_rooms:
+        _merge_bm25_fallback_candidates(
+            hits,
+            query,
+            palace_path,
+            wing,
+            room,
+            n_results,
+            collection_name=collection_name,
+        )
+        drawer_query_fallback = "room_sharded_vector+bm25_sqlite"
+
     # Candidate strategy hook: optionally widen the rerank pool's *source*
     # before ranking. Default ("vector") is a no-op; "union" merges top-K
     # BM25 candidates from sqlite. See `_apply_candidate_strategy`.
-    # ``max_distance`` is forwarded so union mode can refuse to inject
-    # BM25-only (distance=None) candidates that would silently bypass the
-    # caller's strict distance threshold.
+    # ``max_distance`` is forwarded for signature stability; it bounds the
+    # vector channel only (applied in the vector-hit loop above), while
+    # union injects BM25-only candidates gated on ``bm25_score > 0``.
     _apply_candidate_strategy(
         candidate_strategy,
         hits,
@@ -990,9 +1249,15 @@ def search_memories(
         h.pop("_source_file_full", None)
         h.pop("_chunk_index", None)
 
-    return {
+    response = {
         "query": query,
         "filters": {"wing": wing, "room": room},
         "total_before_filter": len(_first_or_empty(drawer_results, "documents")),
         "results": hits,
     }
+    if drawer_query_fallback:
+        response["fallback"] = drawer_query_fallback
+        response["fallback_reason"] = "vector_wing_filter_id_lookup_error"
+    if drawer_query_failed_rooms:
+        response["vector_failed_rooms"] = drawer_query_failed_rooms
+    return response

@@ -84,6 +84,187 @@ class TestSearchMemories:
         assert "error" in result
         assert "query failed" in result["error"]
 
+    def test_wing_only_id_lookup_error_uses_room_sharded_vector_search(self):
+        """Broad Chroma wing filters can raise ``Error finding id`` while
+        equivalent wing+room filters still work. A small-room wing should keep
+        vector quality by querying each room and merging the candidates.
+        """
+        mock_col = MagicMock()
+        mock_col.query.side_effect = [
+            RuntimeError("Error executing plan: Internal error: Error finding id"),
+            {
+                "documents": [["room one planning note"]],
+                "metadatas": [
+                    [
+                        {
+                            "wing": "notes",
+                            "room": "r1",
+                            "source_file": "r1.md",
+                            "chunk_index": 0,
+                        }
+                    ]
+                ],
+                "distances": [[0.2]],
+                "ids": [["d1"]],
+            },
+            {
+                "documents": [["room two planning note"]],
+                "metadatas": [
+                    [
+                        {
+                            "wing": "notes",
+                            "room": "r2",
+                            "source_file": "r2.md",
+                            "chunk_index": 0,
+                        }
+                    ]
+                ],
+                "distances": [[0.1]],
+                "ids": [["d2"]],
+            },
+        ]
+
+        with (
+            patch("mempalace.searcher.get_collection", return_value=mock_col),
+            patch("mempalace.searcher.get_closets_collection", side_effect=RuntimeError("none")),
+            patch("mempalace.searcher._rooms_for_wing_via_sqlite", return_value=["r1", "r2"]),
+        ):
+            result = search_memories("planning", "/fake/path", wing="notes", n_results=5)
+
+        assert "error" not in result
+        assert result["fallback"] == "room_sharded_vector"
+        assert {r["room"] for r in result["results"]} == {"r1", "r2"}
+        assert all(r["wing"] == "notes" for r in result["results"])
+        shard_wheres = [call.kwargs["where"] for call in mock_col.query.call_args_list[1:]]
+        assert shard_wheres == [
+            {"$and": [{"wing": "notes"}, {"room": "r1"}]},
+            {"$and": [{"wing": "notes"}, {"room": "r2"}]},
+        ]
+
+    def test_wing_only_partial_room_shards_merge_bm25_coverage(self):
+        mock_col = MagicMock()
+        mock_col.query.side_effect = [
+            RuntimeError("Error executing plan: Internal error: Error finding id"),
+            RuntimeError("Error executing plan: Internal error: Error finding id"),
+            {
+                "documents": [["room two semantic planning note"]],
+                "metadatas": [
+                    [
+                        {
+                            "wing": "notes",
+                            "room": "r2",
+                            "source_file": "r2.md",
+                            "chunk_index": 0,
+                        }
+                    ]
+                ],
+                "distances": [[0.1]],
+                "ids": [["d2"]],
+            },
+        ]
+        bm25_result = {
+            "results": [
+                {
+                    "text": "room one lexical planning note",
+                    "wing": "notes",
+                    "room": "r1",
+                    "source_file": "r1.md",
+                    "created_at": "unknown",
+                    "similarity": None,
+                    "distance": None,
+                    "matched_via": "bm25_sqlite",
+                    "bm25_score": 1.0,
+                }
+            ]
+        }
+
+        with (
+            patch("mempalace.searcher.get_collection", return_value=mock_col),
+            patch("mempalace.searcher.get_closets_collection", side_effect=RuntimeError("none")),
+            patch("mempalace.searcher._rooms_for_wing_via_sqlite", return_value=["r1", "r2"]),
+            patch("mempalace.searcher._bm25_only_via_sqlite", return_value=bm25_result),
+        ):
+            result = search_memories("planning", "/fake/path", wing="notes", n_results=5)
+
+        assert result["fallback"] == "room_sharded_vector+bm25_sqlite"
+        assert result["vector_failed_rooms"] == ["r1"]
+        assert {r["room"] for r in result["results"]} == {"r1", "r2"}
+
+    def test_wing_only_id_lookup_error_falls_back_to_bm25_when_sharding_unavailable(self):
+        mock_col = MagicMock()
+        mock_col.query.side_effect = RuntimeError(
+            "Error executing plan: Internal error: Error finding id"
+        )
+        bm25_result = {
+            "query": "planning",
+            "filters": {"wing": "notes", "room": None},
+            "total_before_filter": 1,
+            "results": [
+                {
+                    "text": "planning note",
+                    "wing": "notes",
+                    "room": "r1",
+                    "source_file": "r1.md",
+                    "created_at": "unknown",
+                    "similarity": None,
+                    "distance": None,
+                    "matched_via": "bm25_sqlite",
+                    "bm25_score": 1.0,
+                }
+            ],
+            "fallback": "bm25_only_via_sqlite",
+        }
+
+        with (
+            patch("mempalace.searcher.get_collection", return_value=mock_col),
+            patch("mempalace.searcher._query_wing_by_room_shards", return_value=None),
+            patch("mempalace.searcher._bm25_only_via_sqlite", return_value=bm25_result),
+        ):
+            result = search_memories("planning", "/fake/path", wing="notes", n_results=5)
+
+        assert result["fallback"] == "bm25_only_via_sqlite"
+        assert result["fallback_reason"] == "vector_filter_id_lookup_error"
+        assert "Error finding id" in result["vector_error"]
+        assert result["results"][0]["wing"] == "notes"
+
+    def test_scoped_id_lookup_error_falls_back_to_bm25(self):
+        mock_col = MagicMock()
+        mock_col.query.side_effect = RuntimeError(
+            "Error executing plan: Internal error: Error finding id"
+        )
+        bm25_result = {
+            "query": "planning",
+            "filters": {"wing": "notes", "room": "r1"},
+            "total_before_filter": 1,
+            "results": [
+                {
+                    "text": "planning note",
+                    "wing": "notes",
+                    "room": "r1",
+                    "source_file": "r1.md",
+                    "created_at": "unknown",
+                    "similarity": None,
+                    "distance": None,
+                    "matched_via": "bm25_sqlite",
+                    "bm25_score": 1.0,
+                }
+            ],
+            "fallback": "bm25_only_via_sqlite",
+        }
+
+        with (
+            patch("mempalace.searcher.get_collection", return_value=mock_col),
+            patch("mempalace.searcher._bm25_only_via_sqlite", return_value=bm25_result),
+        ):
+            result = search_memories(
+                "planning", "/fake/path", wing="notes", room="r1", n_results=5
+            )
+
+        assert result["fallback"] == "bm25_only_via_sqlite"
+        assert result["fallback_reason"] == "vector_filter_id_lookup_error"
+        assert "Error finding id" in result["vector_error"]
+        assert result["results"][0]["room"] == "r1"
+
     def test_search_memories_vector_path_uses_explicit_collection_name(self):
         mock_col = MagicMock()
         mock_col.query.return_value = {

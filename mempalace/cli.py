@@ -258,7 +258,7 @@ def cmd_init(args):
     llm_provider = None
     if not getattr(args, "no_llm", False):
         provider_name = getattr(args, "llm_provider", "ollama") or "ollama"
-        provider_model = getattr(args, "llm_model", "gemma4:e4b") or "gemma4:e4b"
+        provider_model = getattr(args, "llm_model", "qwen3.6:35b") or "qwen3.6:35b"
         try:
             candidate = get_provider(
                 name=provider_name,
@@ -1203,8 +1203,8 @@ def main():
     )
     p_init.add_argument(
         "--llm-model",
-        default="gemma4:e4b",
-        help="Model name for the chosen provider (default: gemma4:e4b for Ollama).",
+        default="qwen3.6:35b",
+        help="Model name for the chosen provider (default: qwen3.6:35b for Ollama).",
     )
     p_init.add_argument(
         "--llm-endpoint",
